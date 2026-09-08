@@ -1,0 +1,104 @@
+name: Sync stable upstream releases
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scent-assistant-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out custom branch
+        uses: actions/checkout@v4
+        with:
+          ref: ak-v3-custom
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Find latest stable upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest="$(gh api repos/mr-sparks/scent-assistant/releases/latest --jq '.tag_name')"
+          current="$(cat .upstream-version)"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+      - name: Merge new upstream release
+        if: steps.upstream.outputs.latest != steps.upstream.outputs.current
+        env:
+          LATEST: ${{ steps.upstream.outputs.latest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/mr-sparks/scent-assistant.git || \
+            git remote set-url upstream https://github.com/mr-sparks/scent-assistant.git
+          git fetch upstream "refs/tags/$LATEST:refs/tags/upstream/$LATEST"
+          git merge --no-ff --no-edit "refs/tags/upstream/$LATEST"
+
+          base_version="${LATEST#v}"
+          custom_version="${base_version}.1"
+          sed -i -E \
+            's/"version": "[^"]+"/"version": "'"$custom_version"'"/' \
+            custom_components/scent_assistant/manifest.json
+          printf '%s\n' "$LATEST" > .upstream-version
+
+      - name: Prepare Home Assistant test path
+        run: |
+          sudo mkdir -p /homeassistant
+          sudo ln -s "$GITHUB_WORKSPACE/custom_components" \
+            /homeassistant/custom_components
+
+      - name: Validate custom integration
+        run: |
+          python -m compileall -q custom_components/scent_assistant
+          python -m json.tool \
+            custom_components/scent_assistant/manifest.json >/dev/null
+          PYTHONDONTWRITEBYTECODE=1 python -m unittest discover \
+            -s custom_components/scent_assistant/tests -v
+
+      - name: Commit and push validated update
+        env:
+          LATEST: ${{ steps.upstream.outputs.latest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if ! git diff --quiet; then
+            git add .upstream-version \
+              custom_components/scent_assistant/manifest.json
+            git commit -m "Apply validated upstream release $LATEST"
+          fi
+
+          git push origin HEAD:ak-v3-custom
+
+      - name: Publish custom release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(python -c \
+            'import json; print(json.load(open("custom_components/scent_assistant/manifest.json"))["version"])')"
+          tag="v$version"
+
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            git tag -a "$tag" -m "Scent Assistant custom $version"
+            git push origin "$tag"
+            gh release create "$tag" \
+              --target ak-v3-custom \
+              --title "Scent Assistant Custom $version" \
+              --notes "Validated custom build preserving AK V3 device requirements."
+          fi
