@@ -12,12 +12,12 @@
     { "manufacturer_id": 61441 },
     { "service_uuid": "0000af30-0000-1000-8000-00805f9b34fb" }
   ],
-  "codeowners": ["@mr-sparks"],
+  "codeowners": ["@khalidaljasim"],
   "config_flow": true,
   "dependencies": ["bluetooth"],
-  "documentation": "https://github.com/mr-sparks/scent-assistant",
+  "documentation": "https://github.com/khalidaljasim/scent-assistant",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/mr-sparks/scent-assistant/issues",
+  "issue_tracker": "https://github.com/khalidaljasim/scent-assistant/issues",
   "requirements": ["bleak>=0.21.0", "bleak-retry-connector>=3.0.0"],
-  "version": "1.2.2.1"
+  "version": "1.2.2.2"
 }

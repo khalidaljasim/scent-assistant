@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mr-sparks/scent-assistant/main/images/header.jpg" alt="Scent Assistant" width="100%">
+  <img src="https://raw.githubusercontent.com/khalidaljasim/scent-assistant/main/images/header.jpg" alt="Scent Assistant" width="100%">
 </p>
 
 <h1 align="center">Scent Assistant</h1>
 
 <p align="center">
   <a href="https://www.home-assistant.io/"><img src="https://img.shields.io/badge/Home%20Assistant-Integration-41BDF5?style=for-the-badge&logo=home-assistant&logoColor=white" alt="Home Assistant"></a>
-  <a href="https://github.com/mr-sparks/scent-assistant/releases"><img src="https://img.shields.io/github/v/release/mr-sparks/scent-assistant?style=for-the-badge" alt="Release"></a>
+  <a href="https://github.com/khalidaljasim/scent-assistant/releases"><img src="https://img.shields.io/github/v/release/khalidaljasim/scent-assistant?style=for-the-badge" alt="Release"></a>
   <a href="https://github.com/hacs/integration"><img src="https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge" alt="HACS"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge" alt="License"></a>
-  <a href="https://github.com/mr-sparks/scent-assistant/stargazers"><img src="https://img.shields.io/github/stars/mr-sparks/scent-assistant?style=for-the-badge" alt="Stars"></a>
+  <a href="https://github.com/khalidaljasim/scent-assistant/stargazers"><img src="https://img.shields.io/github/stars/khalidaljasim/scent-assistant?style=for-the-badge" alt="Stars"></a>
 </p>
 
 <p align="center">
@@ -57,7 +57,7 @@
 
 Most waterless cold-air nebulizing scent/aroma diffusers that use the **Aroma-Link** or **Aroma Buddy** apps should work. These are sold under various brand names on Amazon and AliExpress.
 
-> **Have a working device not listed here?** Please [open an issue](https://github.com/mr-sparks/scent-assistant/issues) to let us know!
+> **Have a working device not listed here?** Please [open an issue](https://github.com/khalidaljasim/scent-assistant/issues) to let us know!
 
 ---
 
@@ -65,10 +65,10 @@ Most waterless cold-air nebulizing scent/aroma diffusers that use the **Aroma-Li
 
 ### HACS (Recommended)
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mr-sparks&repository=scent-assistant&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=khalidaljasim&repository=scent-assistant&category=integration)
 
 1. Click the button above, or in Home Assistant go to **HACS > Integrations > three dots > Custom repositories**
-2. Add `https://github.com/mr-sparks/scent-assistant` as **Integration**
+2. Add `https://github.com/khalidaljasim/scent-assistant` as **Integration**
 3. Search for **Scent Assistant** and click **Download**
 4. Restart Home Assistant
 
@@ -308,7 +308,7 @@ This integration was built by reverse engineering the BLE protocols of both devi
 
 ## &#x1F91D; Contributing
 
-Contributions are welcome! If you have a diffuser that uses the Aroma-Link or Aroma Buddy app and can help test, please [open an issue](https://github.com/mr-sparks/scent-assistant/issues).
+Contributions are welcome! If you have a diffuser that uses the Aroma-Link or Aroma Buddy app and can help test, please [open an issue](https://github.com/khalidaljasim/scent-assistant/issues).
 
 ---
 

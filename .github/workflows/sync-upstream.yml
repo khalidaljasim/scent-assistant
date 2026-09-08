@@ -42,9 +42,18 @@ jobs:
         if: steps.upstream.outputs.latest != steps.upstream.outputs.current
         env:
           LATEST: ${{ steps.upstream.outputs.latest }}
+          CURRENT: ${{ steps.upstream.outputs.current }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          current_base="${CURRENT#v}"
+          sed -i -E \
+            's/"version": "[^"]+"/"version": "'"$current_base"'"/' \
+            custom_components/scent_assistant/manifest.json
+          git add custom_components/scent_assistant/manifest.json
+          git commit -m "Normalize version before upstream $LATEST"
+
           git remote add upstream https://github.com/mr-sparks/scent-assistant.git || \
             git remote set-url upstream https://github.com/mr-sparks/scent-assistant.git
           git fetch upstream "refs/tags/$LATEST:refs/tags/upstream/$LATEST"
