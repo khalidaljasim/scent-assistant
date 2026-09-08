@@ -18,7 +18,6 @@ from .const import (
     CLOUD_ENDPOINT_SWITCH,
     CLOUD_ENDPOINT_STATUS,
     CLOUD_ENDPOINT_SCHEDULE,
-    CLOUD_ENDPOINT_WORK_TIME,
     CLOUD_WEB_URL,
 )
 
@@ -293,44 +292,6 @@ class AromaLinkCloudClient:
             _LOGGER.error("Cloud status error: %s", err)
             return None
 
-    async def get_schedule(self, device_id: str, weekday: int) -> dict | None:
-        """Fetch the schedule the device currently holds for one weekday.
-
-        Mirrors the app's getWeekWorkTime(). `weekday` uses the same
-        1=Mon … 7=Sun numbering as `set_schedule`.
-
-        Without this the Start/End Time entities have nothing to restore
-        from after a restart and fall back to their defaults, which then
-        misrepresent a device that is still running the real schedule.
-        """
-        if not self.authenticated:
-            return None
-
-        session = await self._ensure_session()
-        url = (
-            f"{CLOUD_BASE_URL}"
-            f"{CLOUD_ENDPOINT_WORK_TIME.format(device_id=device_id)}"
-            f"?userId={self._user_id}&week={int(weekday)}"
-        )
-
-        try:
-            async with session.get(
-                url,
-                headers=self._auth_headers(),
-                timeout=aiohttp.ClientTimeout(total=15),
-                ssl=False,
-            ) as resp:
-                if resp.status != 200:
-                    _LOGGER.error("Cloud schedule read failed: HTTP %s", resp.status)
-                    return None
-
-                data = await resp.json(content_type=None)
-                _LOGGER.debug("Cloud schedule read response: %s", data)
-                return self._parse_schedule(data)
-        except Exception as err:
-            _LOGGER.error("Cloud schedule read error: %s", err)
-            return None
-
     async def set_schedule(
         self,
         device_id: str,
@@ -508,71 +469,6 @@ class AromaLinkCloudClient:
         return devices
 
     @staticmethod
-    def _parse_time(value) -> tuple[int, int] | None:
-        """Parse an "HH:mm" slot boundary into (hour, minute).
-
-        The API uses "24:00" as the end of an all-day slot, which HA's
-        time entity can't represent — clamp it to 23:59.
-        """
-        if not isinstance(value, str) or ":" not in value:
-            return None
-        head, _, tail = value.partition(":")
-        try:
-            hour, minute = int(head), int(tail)
-        except ValueError:
-            return None
-        if hour == 24 and minute == 0:
-            return 23, 59
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            return None
-        return hour, minute
-
-    @classmethod
-    def _parse_schedule(cls, data: dict) -> dict | None:
-        """Pick the live slot out of a weekday's work-time list.
-
-        A day holds several slots and the device runs the enabled ones,
-        so prefer the first enabled slot and fall back to the first slot
-        of any kind — a disabled slot still carries the times the user
-        last configured, which beats showing a default.
-        """
-        if not isinstance(data, dict):
-            return None
-        slots = data.get("data")
-        if not isinstance(slots, list) or not slots:
-            return None
-
-        chosen = next(
-            (s for s in slots if isinstance(s, dict) and s.get("enabled") == 1), None
-        )
-        if chosen is None:
-            chosen = next((s for s in slots if isinstance(s, dict)), None)
-        if chosen is None:
-            return None
-
-        result: dict = {"schedule_enabled": chosen.get("enabled") == 1}
-
-        start = cls._parse_time(chosen.get("startHour"))
-        if start is not None:
-            result["start_hour"], result["start_minute"] = start
-        end = cls._parse_time(chosen.get("endHour"))
-        if end is not None:
-            result["end_hour"], result["end_minute"] = end
-
-        for key, field in (("work_seconds", "workSec"), ("pause_seconds", "pauseSec")):
-            raw = chosen.get(field)
-            if raw is None:
-                continue
-            try:
-                seconds = int(raw)
-            except (TypeError, ValueError):
-                continue
-            if seconds > 0:
-                result[key] = seconds
-
-        return result
-
-    @staticmethod
     def _parse_status(data: dict) -> dict | None:
         """Parse device status into a simple dict."""
         if not isinstance(data, dict):
@@ -601,31 +497,6 @@ class AromaLinkCloudClient:
             "work_remain": info.get("workRemainTime"),
             "pause_remain": info.get("pauseRemainTime"),
         }
-
-        # The work-status payload also carries the configured schedule
-        # window and durations (@b4rtimp's device reports startTime
-        # "06:00" / endTime "21:30" / workTime 15 / pauseTime 120, #24).
-        # Taking them from here is both cheaper and more trustworthy than
-        # the separate schedule endpoint: it costs no extra request and
-        # it's the device's own live configuration rather than a slot
-        # list whose layout we have to pick from.
-        start = AromaLinkCloudClient._parse_time(info.get("startTime"))
-        if start is not None:
-            result["start_hour"], result["start_minute"] = start
-        end = AromaLinkCloudClient._parse_time(info.get("endTime"))
-        if end is not None:
-            result["end_hour"], result["end_minute"] = end
-
-        for key, field in (("work_seconds", "workTime"), ("pause_seconds", "pauseTime")):
-            raw = info.get(field)
-            if raw is None:
-                continue
-            try:
-                seconds = int(raw)
-            except (TypeError, ValueError):
-                continue
-            if seconds > 0:
-                result[key] = seconds
 
         # Oil level: the cloud reports `remainOil`, but its unit depends
         # on the device. Per the official app's updateRemainOil() it is

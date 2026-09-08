@@ -25,10 +25,18 @@ async def async_setup_entry(
     if device.device_type == DeviceType.SCENTIMENT:
         return
 
-    async_add_entities([
-        DiffuserStartTime(device, entry),
-        DiffuserEndTime(device, entry),
-    ])
+    entities = [
+        DiffuserStartTime(device, entry), DiffuserEndTime(device, entry),
+    ]
+    entities.extend(
+        entity
+        for slot in range(1, 6)
+        for entity in (
+            AKV3ScheduleTime(device, entry, 1, slot, True),
+            AKV3ScheduleTime(device, entry, 1, slot, False),
+        )
+    )
+    async_add_entities(entities)
 
 
 class DiffuserStartTime(TimeEntity):
@@ -57,7 +65,7 @@ class DiffuserStartTime(TimeEntity):
 
     @property
     def available(self) -> bool:
-        return self._device.available
+        return self._device.available and not self._device.protocol_is_v3
 
     async def async_set_value(self, value: time) -> None:
         """Set the start time and write schedule to device."""
@@ -100,7 +108,7 @@ class DiffuserEndTime(TimeEntity):
 
     @property
     def available(self) -> bool:
-        return self._device.available
+        return self._device.available and not self._device.protocol_is_v3
 
     async def async_set_value(self, value: time) -> None:
         """Set the end time and write schedule to device."""
@@ -115,3 +123,47 @@ class DiffuserEndTime(TimeEntity):
             work_seconds=self._device.state.work_seconds or 10,
             pause_seconds=self._device.state.pause_seconds or 120,
         )
+
+
+class AKV3ScheduleTime(TimeEntity):
+    """Explicit endpoint+slot start or end time for an AK V3 schedule."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, device, entry, endpoint: int, slot: int, is_start: bool) -> None:
+        self._device, self._endpoint, self._slot, self._is_start = device, endpoint, slot, is_start
+        label = "start" if is_start else "end"
+        self._attr_name = f"Schedule {slot} {label} time"
+        self._attr_icon = "mdi:clock-start" if is_start else "mdi:clock-end"
+        self._attr_unique_id = f"{device.unique_id}_schedule_{slot}_{label}_time"
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    @property
+    def _schedule(self):
+        return self._device.state.ak_v3_schedules.get((self._endpoint, self._slot))
+
+    @property
+    def native_value(self) -> time | None:
+        if self._schedule is None:
+            return None
+        return time(
+            self._schedule.start_hour if self._is_start else self._schedule.end_hour,
+            self._schedule.start_minute if self._is_start else self._schedule.end_minute,
+        )
+
+    @property
+    def available(self) -> bool:
+        return self._device.ak_v3_read_available("schedules") and self._schedule is not None
+
+    async def async_set_value(self, value: time) -> None:
+        fields = (
+            {"start_hour": value.hour, "start_minute": value.minute}
+            if self._is_start
+            else {"end_hour": value.hour, "end_minute": value.minute}
+        )
+        await self._device.async_update_ak_v3_slot(self._endpoint, self._slot, **fields)

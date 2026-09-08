@@ -2,6 +2,7 @@
 from enum import StrEnum
 
 DOMAIN = "scent_assistant"
+AK_V3_BOOT_SETTLE_SECONDS = 30
 
 # ---------------------------------------------------------------------------
 # Device types
@@ -97,36 +98,29 @@ SM_AK_CMD_READ_DEVICE_LABEL = 0x85    # 85 → 85 + label byte
 SM_AK_CMD_READ_FIRMWARE = 0x86        # 86 → 86 + "Vx.xx" PCB firmware
 SM_AK_CMD_READ_EQUIPMENT = 0x88       # 88 → 88 + "Vx.x" equipment version
 
-# V3 read commands (introduced after the V3 secondary login). The device
-# pushes responses async, sometimes multiple per query:
-SM_AK_CMD_V3_READ_NAME = 0xC6         # C6 → 42 + utf8 name (multi-push variant)
-SM_AK_CMD_V3_READ_SCHEDULES = 0xC5    # C5 → multiple 4A 01 02 03 04 SS ... pushes
-SM_AK_CMD_V3_READ_SLOT = 0xCA         # CA 01 SS → individual slot 4A response
-SM_AK_CMD_V3_READ_LABEL = 0xC7        # C7 → 48 + 16-byte label (e.g. "Evasion" padded)
-SM_AK_CMD_V3_READ_OIL = 0xC8          # C8 → 4B 00 <max_ml u16> <current_ml u16>
-SM_AK_CMD_V3_READ_OIL_INFO = 0xCE     # CE → 50 <enabled> <consumption×100 u16> <…> ; only consumption trusted (4B owns current/max/%, days computed — @Mins95 #8)
-SM_AK_CMD_V3_READ_FIRMWARE = 0xCB     # CB → 44 + PCB version + Equipment version (32 bytes)
-SM_AK_CMD_V3_READ_CONTROL = 0xC4      # C4 → 4D 01 <mask>  (power/fan/lamp/lock bitmask)
-SM_AK_CMD_V3_READ_MODEL = 0xD0        # D0 → 45 + utf8 model code (e.g. "A305M")
-SM_AK_CMD_V3_READ_GRADE_TABLE = 0xC3  # C3 → 47 + N×(work_u16 pause_u16) Level grade table
+# V3 read commands recovered from the official application. Responses are
+# asynchronous; keep requests serialized by the device manager.
+SM_AK_CMD_V3_READ_NAME = 0xC1         # C1 → 42 + UTF-8 device name
+SM_AK_CMD_V3_READ_LABEL = 0xC2        # C2 → 43 + UTF-8 device label
+SM_AK_CMD_V3_READ_FIRMWARE = 0xC3     # C3 → 44 + PCB/equipment versions
+SM_AK_CMD_V3_READ_MODEL = 0xC4        # C4 → 45 + UTF-8 device type/model
+SM_AK_CMD_V3_READ_LIMITS = 0xC5       # C5 → 46 + grade/custom limits
+SM_AK_CMD_V3_READ_GRADE_TABLE = 0xC6  # C6 → 47 + grade work/pause records
+SM_AK_CMD_V3_READ_FRAGRANCES = 0xC7   # C7 → 48 + ordered 16-byte fragrance records
+SM_AK_CMD_V3_READ_OIL = 0xC8          # C8 → 4B status + total/current records
+SM_AK_CMD_V3_READ_OIL_INFO = 0xCE     # CE → 50 flow/calculation data
+SM_AK_CMD_V3_READ_CONTROL = 0xC4      # C4 also yields control state on legacy firmware
 
 # Response opcodes (parsed by `parse_notification`):
 SM_AK_RESP_SCHEDULE_V2 = 0x83         # mirrors the V2 read opcode
 SM_AK_RESP_SCHEDULE_V3 = 0x4A         # mirrors the V3 schedule write opcode (0x2A) flipped
 SM_AK_RESP_DEVICE_NAME_V3 = 0x42      # response to C6
-SM_AK_RESP_LABEL_V3 = 0x48            # response to C7
+SM_AK_RESP_LABEL_V3 = 0x43            # response to C2
+SM_AK_RESP_FRAGRANCES_V3 = 0x48       # response to C7
 SM_AK_RESP_MODEL_V3 = 0x45            # response to D0
 SM_AK_RESP_FIRMWARE_V3 = 0x44         # response to CB (same opcode as our existing V2 parser)
 SM_AK_RESP_CONTROL = 0x4D             # control bitmask push/read (V2: 4D mask, V3: 4D 01 mask)
 SM_AK_RESP_GRADE_TABLE = 0x47         # response to C3: 47 + N×(work_u16 pause_u16), @Mins95 #8
-
-# Offset 1 of the V3 schedule frame (2A write / 4A read) is the diffuser
-# endpoint. Single-pump units always report 01; the A309 has three
-# independently programmable pumps and pushes a full slot set per
-# endpoint (@danieledwardgeorgehitchcock, #22). We write to the first one
-# only, so we read that one only — see the 4A branch of
-# `parse_notification`.
-SM_AK_V3_PRIMARY_ENDPOINT = 0x01
 
 # AK control-state bitmask layout (LSB = onOff). Mirrors writeTotalControl()
 # which builds a binary string "lock|lamp|1|demo|fan|onOff" → int(s, 2).
@@ -153,18 +147,13 @@ SM_AK_LOGIN_PRIMARY = bytes.fromhex("8F38383838")
 SM_AK_LOGIN_SECONDARY_V3 = bytes.fromhex("8F383838384F4B3031")
 SM_AK_OPCODE_LOGIN_RESPONSE = 0x8F
 
-# V3 devices require this 3-byte "commit" suffix as a *separate* frame after
-# most state-changing writes (power-on, fan toggle, schedule write). Same
-# bytes as the legacy AK heartbeat — different role.
-SM_AK_V3_COMMIT = bytes([0xE0, 0xAA, 0x55])
-
 # V3 fan-control frames (note: 0x2A prefix, not the 0x2D control bitmask).
 SM_AK_V3_FAN_ON = bytes.fromhex("2A01020300")
 SM_AK_V3_FAN_OFF = bytes.fromhex("2A01020100")
 
-# V3 schedule layout has only two slots, fixed by purpose in the official
-# app's UI (Weekend / Weekday). The slot index is captured verbatim — we
-# don't know if the device's firmware accepts other indices.
+# Early V3 captures showed two purpose-labelled slots (Weekend / Weekday),
+# but current device read-back can return additional physical slots. Keep
+# these observed constants without treating them as a complete slot list.
 SM_AK_V3_SLOT_WEEKEND = 0x04
 SM_AK_V3_SLOT_WEEKDAY = 0x05
 # Trailer bytes appended to every V3 schedule write. Purpose unknown
@@ -206,16 +195,6 @@ BLE_NAME_PATTERNS = {
     # are detected via the AF30 service / manufacturer data instead, but
     # some expose "DiffuserAroMax" directly — match that as a fallback.
     DeviceType.AROMELY_ARO_MAX: ["DiffuserAroMax", "DiffuserAro"],
-    # "SA_" — Scent Marketing AK sold under other brands (AromaTech
-    # Ambience SA_AT600, #29). Normally these are identified by their
-    # manufacturer data, but some units advertise none at all: just the
-    # FFF0 service UUID and the name. @kartikkp's GATT dump shows the
-    # AK shape unambiguously — FFF6 carrying read + write-without-
-    # response + notify as one command/response channel — so route the
-    # name prefix to the AK family rather than letting it fall through
-    # to the Aroma-Link default, whose FFF1-notify / FFF2-write layout
-    # these devices do not have.
-    DeviceType.SCENT_MARKETING_AK: ["SA_"],
 }
 
 # Scent Marketing devices are identified primarily by manufacturer-specific
@@ -233,10 +212,7 @@ SM_GW_FLAG_WIFI = {"01", "02", "03"}
 SM_GW_FLAG_CELLULAR = {"B1", "B2"}
 
 # AK manufacturer-data leading byte 02 → device requires periodic heartbeat
-# `E0AA55` to keep BLE notifications flowing.
 SM_AK_FLAG_HEARTBEAT = "02"
-SM_AK_HEARTBEAT_BYTES = bytes([0xE0, 0xAA, 0x55])
-SM_AK_HEARTBEAT_INTERVAL_S = 5.0
 
 # ---------------------------------------------------------------------------
 # Tuya BLE protocol constants
@@ -403,15 +379,6 @@ CLOUD_ENDPOINT_DEVICES = "/v1/app/device/listAll/{user_id}"
 CLOUD_ENDPOINT_SWITCH = "/v1/app/data/newSwitch"
 CLOUD_ENDPOINT_STATUS = "/v1/app/device/work/{device_id}"
 CLOUD_ENDPOINT_SCHEDULE = "/v1/app/data/workSetApp"
-# Schedule read-back. The app's GET_WEEK_WORK_TIME_URL — one call per
-# weekday, returning that day's work-time slots.
-CLOUD_ENDPOINT_WORK_TIME = "/v1/app/device/newWorkTime/{device_id}"
-
-# How many cloud polls to skip between schedule read-backs. The schedule
-# only changes when someone edits it, so re-reading it every poll would
-# double our request rate against the vendor's API for nothing; once
-# every 10 polls still picks up an app-side edit within minutes.
-CLOUD_SCHEDULE_REFRESH_EVERY = 10
 
 # Polling interval for cloud-mode devices. The integration previously had no
 # periodic refresh, so HA never observed autonomous spray cycles between
@@ -448,6 +415,10 @@ CONF_CONNECTION_MODE = "connection_mode"
 # firmware sometimes ships locked; setting this lets the device accept
 # our control commands).
 CONF_GW_PASSWORD = "gw_password"
+# AK devices authenticate with a four-character PIN. Existing entries without
+# this key use the same default so the entry format remains backwards compatible.
+CONF_AK_PASSWORD = "ak_password"
+DEFAULT_AK_PASSWORD = "8888"
 
 # ---------------------------------------------------------------------------
 # Defaults

@@ -1,21 +1,16 @@
 """Select entities for Scent Diffuser."""
 from __future__ import annotations
 
-import logging
-
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, DeviceType
 from .device import ScentDiffuserDevice
 
-_LOGGER = logging.getLogger(__name__)
-
 MODE_CUSTOM = "Custom"
-MODE_LEVEL = "Level"
+MODE_FIXED = "Fixed"
 
 
 async def async_setup_entry(
@@ -27,55 +22,59 @@ async def async_setup_entry(
     device: ScentDiffuserDevice = hass.data[DOMAIN][entry.entry_id]
 
     entities: list[SelectEntity] = []
-    # The Custom/Level schedule mode is an AK V3 concept. The entity stays
-    # unavailable until the device identifies as V3 on first connect, so it's
-    # safe to register for the whole AK family (V2 simply never exposes it).
+    # AK V3 records are physical per-slot schedules. Do not expose a global
+    # mode selector that could imply a write to an unspecified physical slot.
     if device.device_type == DeviceType.SCENT_MARKETING_AK:
-        entities.append(ScheduleModeSelect(device, entry))
+        entities.extend(AKV3ScheduleModeSelect(device, entry, 1, slot) for slot in range(1, 6))
 
     async_add_entities(entities)
 
 
-class ScheduleModeSelect(SelectEntity):
-    """Custom vs Level schedule-mode selector for AK V3 (@Mins95, #8).
-
-    The integration already switches mode implicitly (setting a Work/Pause
-    Duration selects Custom, setting Intensity selects Level). This makes the
-    mode an explicit control so the user can pin it without accidentally
-    flipping it via a side-effect of another change.
-    """
+class AKV3ScheduleModeSelect(SelectEntity):
+    """Explicit mode selector for one physical AK V3 schedule slot."""
 
     _attr_has_entity_name = True
-    _attr_name = "Schedule mode"
     _attr_icon = "mdi:tune-variant"
-    _attr_entity_category = EntityCategory.CONFIG
-    _attr_options = [MODE_LEVEL, MODE_CUSTOM]
 
-    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
-        self._device = device
-        self._attr_unique_id = f"{device.unique_id}_schedule_mode"
+    def __init__(self, device, entry, endpoint: int, slot: int) -> None:
+        self._device, self._endpoint, self._slot = device, endpoint, slot
+        self._attr_name = f"Schedule {slot} mode"
+        self._attr_unique_id = f"{device.unique_id}_schedule_{slot}_mode"
         self._attr_device_info = device.device_info
         device.register_state_callback(self._on_state_update)
 
     def _on_state_update(self) -> None:
-        if self.hass is None:
-            return
-        self.async_write_ha_state()
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    @property
+    def _schedule(self):
+        return self._device.state.ak_v3_schedules.get((self._endpoint, self._slot))
 
     @property
     def current_option(self) -> str | None:
-        mode = self._device.state.schedule_custom_mode
-        if mode is None:
+        if self._schedule is None:
             return None
-        return MODE_CUSTOM if mode else MODE_LEVEL
+        return MODE_CUSTOM if self._schedule.mode == 1 else MODE_FIXED
+
+    @property
+    def options(self) -> list[str]:
+        """Expose Custom only with confirmed device support and usable limits."""
+        if self._device.supports_ak_v3_custom_mode:
+            return [MODE_FIXED, MODE_CUSTOM]
+        return [MODE_FIXED]
 
     @property
     def available(self) -> bool:
         return (
-            self._device.available
-            and self._device.protocol_is_v3
-            and self._device.state.schedule_custom_mode is not None
+            self._device.ak_v3_read_available("schedules")
+            and self._schedule is not None
+            and (self._schedule.mode == 0 or self._device.supports_ak_v3_custom_mode)
         )
 
     async def async_select_option(self, option: str) -> None:
-        await self._device.set_schedule_mode(option == MODE_CUSTOM)
+        if option not in self.options:
+            raise ValueError(f"Unsupported AK V3 schedule mode: {option}")
+        await self._device.async_update_ak_v3_slot(
+            self._endpoint, self._slot, mode=1 if option == MODE_CUSTOM else 0
+        )

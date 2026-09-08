@@ -38,18 +38,14 @@ async def async_setup_entry(
     if device.device_type in SCENT_MARKETING_TYPES and not is_cloud:
         entities.append(DiffuserLockSwitch(device, entry))
         if device.device_type == DeviceType.SCENT_MARKETING_AK:
-            # The AK control bitmask carries a lamp bit we can drive
-            # without any extra protocol work. (The fan switch is already
-            # added above via `device.supports_fan`, which is True for AK —
-            # appending it here too would register a second entity with the
-            # same `_fan` unique_id and HA would reject the duplicate.)
             entities.append(DiffuserLampSwitch(device, entry))
-            # V3 AK devices have a separate program-enabled toggle that
-            # is distinct from Power. We register the entity for every
-            # AK device but make it unavailable on V2 (where it would
-            # just duplicate Power) — `available` checks `protocol.is_v3`
-            # which only resolves after the first BLE login.
             entities.append(DiffuserScheduleSwitch(device, entry))
+            entities.extend(AKV3ScheduleEnabledSwitch(device, entry, 1, slot) for slot in range(1, 6))
+            entities.extend(
+                AKV3ScheduleDaySwitch(device, entry, 1, slot, bit, name)
+                for slot in range(1, 6)
+                for bit, name in enumerate(("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"))
+            )
 
     async_add_entities(entities)
 
@@ -78,6 +74,8 @@ class DiffuserPowerSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
+        if self._device.device_type == DeviceType.SCENT_MARKETING_AK and self._device.protocol_is_v3:
+            return self._device.ak_v3_read_available("power")
         return self._device.available
 
     async def async_turn_on(self, **kwargs) -> None:
@@ -111,7 +109,10 @@ class DiffuserLockSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return self._device.available
+        return self._device.available and not (
+            self._device.device_type == DeviceType.SCENT_MARKETING_AK
+            and self._device.protocol_is_v3
+        )
 
     async def async_turn_on(self, **kwargs) -> None:
         await self._device.set_lock(True)
@@ -152,13 +153,80 @@ class DiffuserScheduleSwitch(SwitchEntity):
     @property
     def available(self) -> bool:
         # V3-only: V2 devices have no separate program toggle.
-        return self._device.available and self._device.protocol_is_v3
+        return False
 
     async def async_turn_on(self, **kwargs) -> None:
         await self._device.set_schedule_enabled(True)
 
     async def async_turn_off(self, **kwargs) -> None:
         await self._device.set_schedule_enabled(False)
+
+
+class _AKV3ScheduleSwitch(SwitchEntity):
+    """Base for explicit endpoint+slot AK V3 schedule switches."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, device, entry, endpoint: int, slot: int) -> None:
+        self._device, self._endpoint, self._slot = device, endpoint, slot
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    @property
+    def _schedule(self):
+        return self._device.state.ak_v3_schedules.get((self._endpoint, self._slot))
+
+    @property
+    def available(self) -> bool:
+        return self._device.ak_v3_read_available("schedules") and self._schedule is not None
+
+
+class AKV3ScheduleEnabledSwitch(_AKV3ScheduleSwitch):
+    _attr_icon = "mdi:calendar-check"
+
+    def __init__(self, device, entry, endpoint: int, slot: int) -> None:
+        super().__init__(device, entry, endpoint, slot)
+        self._attr_name = f"Schedule {slot} enabled"
+        self._attr_unique_id = f"{device.unique_id}_schedule_{slot}_enabled"
+
+    @property
+    def is_on(self):
+        return self._schedule.enabled if self._schedule else None
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._device.async_update_ak_v3_slot(self._endpoint, self._slot, enabled=True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._device.async_update_ak_v3_slot(self._endpoint, self._slot, enabled=False)
+
+
+class AKV3ScheduleDaySwitch(_AKV3ScheduleSwitch):
+    _attr_icon = "mdi:calendar-week"
+
+    def __init__(self, device, entry, endpoint: int, slot: int, bit: int, day: str) -> None:
+        super().__init__(device, entry, endpoint, slot)
+        self._bit = bit
+        self._attr_name = f"Schedule {slot} {day}"
+        self._attr_unique_id = f"{device.unique_id}_schedule_{slot}_{day.lower()}"
+
+    @property
+    def is_on(self):
+        return bool(self._schedule.days_mask & (1 << self._bit)) if self._schedule else None
+
+    async def _set(self, enabled: bool) -> None:
+        mask = self._schedule.days_mask
+        mask = mask | (1 << self._bit) if enabled else mask & ~(1 << self._bit)
+        await self._device.async_update_ak_v3_slot(self._endpoint, self._slot, days_mask=mask)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._set(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._set(False)
 
 
 class DiffuserLampSwitch(SwitchEntity):
@@ -185,7 +253,13 @@ class DiffuserLampSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return self._device.available
+        if self._device.device_type == DeviceType.SCENT_MARKETING_AK and self._device.protocol_is_v3:
+            return self._device.ak_v3_read_available("light_on") and self._device.state.ak_v3_has_lamp
+        return self._device.available and (
+            self._device.device_type != DeviceType.SCENT_MARKETING_AK
+            or not self._device.protocol_is_v3
+            or self._device.state.ak_v3_has_lamp
+        )
 
     async def async_turn_on(self, **kwargs) -> None:
         await self._device.set_lamp(True)
@@ -221,6 +295,8 @@ class DiffuserFanSwitch(SwitchEntity):
     def available(self) -> bool:
         if self._is_cloud_only:
             return False
+        if self._device.device_type == DeviceType.SCENT_MARKETING_AK and self._device.protocol_is_v3:
+            return self._device.ak_v3_read_available("fan_aggregate")
         return self._device.connection_mode == "ble"
 
     @property

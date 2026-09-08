@@ -58,10 +58,8 @@ async def async_get_config_entry_diagnostics(
             "firmware_version": s.firmware_version,
             "work_seconds": s.work_seconds,
             "pause_seconds": s.pause_seconds,
-            # Scent Marketing AK read-back fields (populated by the
-            # 8301-8305 / C5 / CA01XX response parsers). Without these
-            # in the diagnostic output a reporter can't tell whether
-            # the device's stored schedule was actually read.
+            # Scent Marketing AK read-back fields let a reporter confirm the
+            # stored schedule state seen by the response-driven reader.
             "intensity": s.intensity,
             "weekday_mask": s.weekday_mask,
             "schedule_slot": s.schedule_slot,
@@ -72,6 +70,22 @@ async def async_get_config_entry_diagnostics(
             "device_label": s.device_label,
             "model_code": s.model_code,
             "schedule_enabled": s.schedule_enabled,
+            "ak_v3_schedules": {
+                f"{endpoint}:{slot}": {
+                    "enabled": schedule.enabled,
+                    "start_hour": schedule.start_hour,
+                    "start_minute": schedule.start_minute,
+                    "end_hour": schedule.end_hour,
+                    "end_minute": schedule.end_minute,
+                    "days_mask": schedule.days_mask,
+                    "mode": schedule.mode,
+                    "intensity": schedule.intensity,
+                    "work_seconds": schedule.work_seconds,
+                    "pause_seconds": schedule.pause_seconds,
+                    "raw_frame": schedule.raw_frame.hex(),
+                }
+                for (endpoint, slot), schedule in s.ak_v3_schedules.items()
+            },
         }
 
     payload: dict[str, Any] = {
@@ -85,9 +99,18 @@ async def async_get_config_entry_diagnostics(
             "model": device.model_name if device else None,
             "available": device.available if device else None,
             "connection_mode": device.connection_mode if device else None,
-            "ble_write_response": device.ble_write_response if device else None,
             "supports_fan": device.supports_fan if device else None,
             "supports_cloud": device.supports_cloud if device else None,
+            "ble_connection": device.ble_connection_diagnostics if device else {},
+        },
+        "ak_v3_protocol_scope": device.ak_v3_protocol_scope if device else {},
+        "ak_v3_runtime_readback": {
+            "model_code": device.state.model_code if device else None,
+            "firmware_version": device.state.firmware_version if device else None,
+            "note": (
+                "These are parsed from read-only D0/CB responses when received; "
+                "they are not asserted to match the official-app-reported scope."
+            ),
         },
         "sm_metadata": async_redact_data(
             dict(device.sm_metadata) if device and device.sm_metadata else {},

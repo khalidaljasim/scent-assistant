@@ -5,6 +5,7 @@ import logging
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -24,7 +25,10 @@ async def async_setup_entry(
     if device.device_type == DeviceType.SCENTIMENT:
         return
 
-    entities: list[ButtonEntity] = [TimeSyncButton(device, entry)]
+    entities: list[ButtonEntity] = [
+        TimeSyncButton(device, entry),
+        RefreshDiffuserStateButton(device, entry),
+    ]
     # Momentary diffusion is power-on + delayed power-off, which only
     # makes sense on families where power is a plain on/off (Aroma-Link).
     if device.device_type == DeviceType.AROMA_LINK:
@@ -88,3 +92,42 @@ class TimeSyncButton(ButtonEntity):
             _LOGGER.info("Time synced to %s", self._device.name)
         else:
             _LOGGER.warning("Time sync failed for %s", self._device.name)
+
+
+class RefreshDiffuserStateButton(ButtonEntity):
+    """Run the isolated, read-only AK V3 state refresh."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Refresh Diffuser State"
+    _attr_icon = "mdi:refresh"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, device: ScentDiffuserDevice, entry: ConfigEntry) -> None:
+        self._device = device
+        self._attr_unique_id = f"{device.unique_id}_refresh_state"
+        self._attr_device_info = {"identifiers": {(DOMAIN, device.unique_id)}}
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe only after Home Assistant assigned the entity identity."""
+        await super().async_added_to_hass()
+        self._device.register_state_callback(self._on_state_update)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Leave no callback behind when the entity or entry is removed."""
+        self._device.unregister_state_callback(self._on_state_update)
+        await super().async_will_remove_from_hass()
+
+    def _on_state_update(self) -> None:
+        if self.hass is not None and self.entity_id:
+            self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        return self._device.ak_v3_manual_refresh_available
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | None]:
+        return self._device.ak_v3_manual_refresh_diagnostics
+
+    async def async_press(self) -> None:
+        await self._device.async_refresh_ak_v3_state()

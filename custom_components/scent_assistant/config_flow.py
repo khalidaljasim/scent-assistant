@@ -19,6 +19,8 @@ from .const import (
     CONF_CLOUD_USER_ID,
     CONF_CONNECTION_MODE,
     CONF_GW_PASSWORD,
+    CONF_AK_PASSWORD,
+    DEFAULT_AK_PASSWORD,
     DEFAULT_SCAN_TIMEOUT,
     DeviceType,
 )
@@ -31,7 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle config flow for Scent Diffuser."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         self._discovered_devices: dict[str, dict] = {}
@@ -55,6 +57,8 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             entry_data["sm_metadata"] = self._selected_sm_metadata
         if self._selected_gw_password:
             entry_data[CONF_GW_PASSWORD] = self._selected_gw_password
+        if self._selected_device_type == DeviceType.SCENT_MARKETING_AK:
+            entry_data[CONF_AK_PASSWORD] = DEFAULT_AK_PASSWORD
         return self.async_create_entry(
             title=self._selected_ble_name or "Scent Diffuser",
             data=entry_data,

@@ -62,11 +62,15 @@ async def async_setup_entry(
     # stay unavailable until the device answers C8/CE, so registering them
     # for the whole AK family is safe (V2 simply never populates them).
     if device.device_type == DeviceType.SCENT_MARKETING_AK:
+        entities.append(DiffuserBatterySensor(device, entry))
         entities.append(DiffuserOilSensor(device, entry))
         entities.append(DiffuserOilCurrentSensor(device, entry))
         entities.append(DiffuserOilCapacitySensor(device, entry))
         entities.append(DiffuserOilConsumptionSensor(device, entry))
         entities.append(DiffuserOilDaysSensor(device, entry))
+        entities.extend(
+            DiffuserScheduleSensor(device, entry, slot) for slot in range(1, 6)
+        )
 
     async_add_entities(entities)
 
@@ -103,6 +107,8 @@ class DiffuserStatusSensor(SensorEntity):
             "pause_seconds": state.pause_seconds,
             "start_time": f"{state.start_hour:02d}:{state.start_minute:02d}",
             "end_time": f"{state.end_hour:02d}:{state.end_minute:02d}",
+            "diffusion_enabled": state.diffusion_enabled,
+            "fan_active": state.fan_active,
         }
 
     @property
@@ -136,6 +142,12 @@ class DiffuserBatterySensor(SensorEntity):
 
     @property
     def available(self) -> bool:
+        if self._device.device_type == DeviceType.SCENT_MARKETING_AK:
+            return (
+                self._device.ak_v3_read_available("battery")
+                and self._device.state.ak_v3_has_battery
+                and self._device.state.battery is not None
+            )
         return self._device.available and self._device.state.battery is not None
 
 
@@ -165,6 +177,8 @@ class DiffuserOilSensor(SensorEntity):
 
     @property
     def available(self) -> bool:
+        if self._device.device_type == DeviceType.SCENT_MARKETING_AK and self._device.protocol_is_v3:
+            return self._device.ak_v3_read_available("oil_remaining") and self._device.state.oil_remaining is not None
         return self._device.available and self._device.state.oil_remaining is not None
 
 
@@ -197,7 +211,10 @@ class _OilFieldSensor(SensorEntity):
 
     @property
     def available(self) -> bool:
-        return self._device.available and getattr(self._device.state, self._state_attr) is not None
+        fields = (self._state_attr,)
+        if self._state_attr == "oil_days_remaining":
+            fields = ("oil_current_ml", "oil_consumption_mlh", "schedules", "oil_days_remaining")
+        return self._device.ak_v3_read_available(*fields) and getattr(self._device.state, self._state_attr) is not None
 
 
 class DiffuserOilCurrentSensor(_OilFieldSensor):
@@ -249,6 +266,85 @@ class DiffuserOilDaysSensor(_OilFieldSensor):
     _attr_native_unit_of_measurement = "d"
     _state_attr = "oil_days_remaining"
     _uid_suffix = "oil_days_remaining"
+
+
+class DiffuserScheduleSensor(SensorEntity):
+    """Read-only AK V3 schedule slot reported by a 0x4A frame."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(
+        self, device: ScentDiffuserDevice, entry: ConfigEntry, slot: int
+    ) -> None:
+        self._device = device
+        self._slot = slot
+        self._attr_name = f"Schedule {slot}"
+        self._attr_unique_id = f"{device.unique_id}_schedule_{slot}"
+        self._attr_device_info = device.device_info
+        device.register_state_callback(self._on_state_update)
+
+    def _on_state_update(self) -> None:
+        if self.hass is not None:
+            self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str | None:
+        schedule = self._device.state.ak_v3_schedules.get((1, self._slot))
+        if schedule is None:
+            lifecycle = self._device.ak_v3_slot_lifecycle(1, self._slot)
+            return lifecycle.replace("_", " ").title()
+        return (
+            f"{schedule.start_hour:02d}:{schedule.start_minute:02d}"
+            f" - {schedule.end_hour:02d}:{schedule.end_minute:02d}"
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        schedule = self._device.state.ak_v3_schedules.get((1, self._slot))
+        lifecycle = self._device.ak_v3_slot_lifecycle(1, self._slot)
+        if schedule is None:
+            empty = self._device.state.ak_v3_empty_schedules.get((1, self._slot))
+            absent = lifecycle in (
+                "intentionally_disabled_absent",
+                "unexpectedly_absent",
+            )
+            return {
+                "lifecycle": lifecycle,
+                "can_update": False,
+                "can_create": False,
+                "can_delete": False,
+                "note": (
+                    "Fresh physical empty slot observed; create/delete framing is not staged."
+                    if empty is not None
+                    else "Schedule is absent; create and delete are unsupported."
+                    if absent
+                    else "Schedule presence is being verified; editing is unavailable."
+                ),
+            }
+        day_names = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+        attributes = {
+            "lifecycle": lifecycle,
+            "can_update": lifecycle in ("present_enabled", "present_disabled"),
+            "can_create": False,
+            "can_delete": False,
+            "enabled": schedule.enabled,
+            "days": [
+                day for bit, day in enumerate(day_names)
+                if schedule.days_mask & (1 << bit)
+            ],
+            "mode": "custom" if schedule.mode == 0x01 else "level",
+            "intensity": schedule.intensity,
+            "work_seconds": schedule.work_seconds,
+            "pause_seconds": schedule.pause_seconds,
+        }
+        if self._device.state.ak_v3_transaction_error:
+            attributes["transaction_error"] = self._device.state.ak_v3_transaction_error
+        return attributes
+
+    @property
+    def available(self) -> bool:
+        return self._device.ak_v3_read_available("schedules")
 
 
 class DiffuserWorkRemainSensor(SensorEntity):

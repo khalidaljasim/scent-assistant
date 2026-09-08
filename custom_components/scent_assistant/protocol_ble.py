@@ -5,6 +5,7 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 
 from .const import (
     DeviceType,
@@ -18,25 +19,24 @@ from .const import (
     SM_AK_CMD_READ_SCHEDULE_V2, SM_AK_CMD_READ_DEVICE_TYPE,
     SM_AK_CMD_READ_DEVICE_NAME, SM_AK_CMD_READ_DEVICE_LABEL,
     SM_AK_CMD_READ_FIRMWARE, SM_AK_CMD_READ_EQUIPMENT,
-    SM_AK_CMD_V3_READ_NAME, SM_AK_CMD_V3_READ_SCHEDULES,
-    SM_AK_CMD_V3_READ_SLOT, SM_AK_CMD_V3_READ_LABEL,
+    SM_AK_CMD_V3_READ_NAME, SM_AK_CMD_V3_READ_LABEL,
     SM_AK_CMD_V3_READ_OIL, SM_AK_CMD_V3_READ_OIL_INFO, SM_AK_CMD_V3_READ_FIRMWARE,
-    SM_AK_CMD_V3_READ_CONTROL, SM_AK_CMD_V3_READ_MODEL,
+    SM_AK_CMD_V3_READ_CONTROL, SM_AK_CMD_V3_READ_MODEL, SM_AK_CMD_V3_READ_LIMITS,
+    SM_AK_CMD_V3_READ_FRAGRANCES,
     SM_AK_CMD_V3_READ_GRADE_TABLE, SM_AK_RESP_GRADE_TABLE,
-    SM_AK_V3_PRIMARY_ENDPOINT,
     SM_AK_RESP_SCHEDULE_V3, SM_AK_RESP_DEVICE_NAME_V3,
-    SM_AK_RESP_LABEL_V3, SM_AK_RESP_MODEL_V3,
+    SM_AK_RESP_LABEL_V3, SM_AK_RESP_FRAGRANCES_V3, SM_AK_RESP_MODEL_V3,
     SM_AK_CTRL_BIT_ONOFF, SM_AK_CTRL_BIT_FAN, SM_AK_CTRL_BIT_DEMO,
     SM_AK_CTRL_BIT_RESERVED, SM_AK_CTRL_BIT_LAMP, SM_AK_CTRL_BIT_LOCK,
     SM_AK_LOGIN_PRIMARY, SM_AK_LOGIN_SECONDARY_V3,
-    SM_AK_OPCODE_LOGIN_RESPONSE, SM_AK_V3_COMMIT,
+    SM_AK_OPCODE_LOGIN_RESPONSE,
     SM_AK_V3_FAN_ON, SM_AK_V3_FAN_OFF,
     SM_AK_V3_SLOT_WEEKEND, SM_AK_V3_SLOT_WEEKDAY,
     SM_AK_DAY_MASK_WEEKDAYS, SM_AK_DAY_MASK_WEEKEND, SM_AK_DAY_MASK_DAILY,
     SM_GW_SERVICE_UUID, SM_GW_NOTIFY_UUID, SM_GW_WRITE_UUID,
     SM_MFR_ID_AK, SM_MFR_ID_GW, SM_MFR_ID_GW_ALT,
     SM_GW_FLAG_WIFI, SM_GW_FLAG_CELLULAR,
-    SM_AK_FLAG_HEARTBEAT, SM_AK_HEARTBEAT_BYTES,
+    SM_AK_FLAG_HEARTBEAT,
     SM_GW_FRAME_HEADER, SM_GW_TYPE_BINARY, SM_GW_TYPE_TEXT, SM_GW_CHUNK_SIZE,
     SM_GW_TYPE_BOOL, SM_GW_TYPE_LOCK,
     SM_GW_LEN_NAME, SM_GW_LEN_REMARK,
@@ -88,7 +88,9 @@ class DiffuserState:
     """Represents the current state of a diffuser."""
 
     power: bool | None = None
-    fan: bool | None = None            # Aroma-Link only
+    fan: bool | None = None             # App Fan switch / AK V3 totalFan
+    diffusion_enabled: bool | None = None  # AK V3 totalFog
+    fan_active: bool | None = None      # AK V3 4D runtime fan activity
     phase: str = "unknown"             # "off", "idle", "spraying", "paused"
     work_seconds: int = 0
     pause_seconds: int = 0
@@ -114,17 +116,45 @@ class DiffuserState:
     oil_max_ml: int | None = None
     oil_consumption_mlh: float | None = None
     oil_days_remaining: int | None = None
+    # AK V3 oil metadata. The 0x4B response carries a status byte that must be
+    # preserved verbatim when writing the 0x2B amount table.
+    oil_status_byte: int | None = None
+    oil_names: list[str] = field(default_factory=list)
+    oil_old_calibration_ml: int | None = None
+    # Full seven-byte 0x50 records: saved flag, flow, stored days, old oil.
+    # `oil_days_remaining` is never populated from stored_days.
+    oil_calculation_records: list[tuple[bool, float, int, int]] = field(default_factory=list)
+    ak_v3_capabilities: int | None = None
+    ak_v3_has_oil: bool = False
+    ak_v3_has_battery: bool = False
+    ak_v3_has_custom_mode: bool = False
+    ak_v3_has_aromas: bool = False
+    ak_v3_has_fan: bool = False
+    ak_v3_has_round_battery: bool = False
+    ak_v3_has_lamp: bool = False
+    ak_v3_has_global_control: bool = False
+    ak_v3_reply_chaining: bool = False
+    ak_v3_lamp_type: int | None = None
+    ak_v3_protocol_identity: str | None = None
     # AK V3 schedule mode: True = Custom (work/pause honoured), False =
     # Level (device grade table). None until first read.
     schedule_custom_mode: bool | None = None
     # AK V3 Level grade table: per-level (work_s, pause_s) the device uses in
-    # Level mode, pushed as a 0x47 frame in response to C3 (@Mins95's #8
+    # Level mode, pushed as a 0x47 frame in response to C6 (@Mins95's #8
     # decode). Index = intensity - 1. None until read. Used to compute oil
     # days-remaining in Level mode (Custom mode has the live work/pause).
     grade_table: list | None = None
+    grade_limits: tuple[int, int, int, int, int] | None = None
     light_on: bool | None = None       # auxiliary LED state
     device_name: str | None = None     # user-set device name (DP 6)
-    password_required: bool | None = None  # GW device demands password auth
+    # Some AK V3 app configurations prepend an opaque name prefix. It is kept
+    # separately so an integration that has learned it can preserve it on 0x22.
+    device_name_append_prefix: bytes = b""
+    # Startup metadata is exposed only after the matching AK V3 read response
+    # has been received in this session. Cached values remain internal stale
+    # state when the corresponding response times out.
+    ak_v3_metadata_available: set[str] = field(default_factory=set)
+    password_required: bool | None = None  # GW DP-13 status only, never AK auth
     firmware_version: str | None = None    # PCB+MCU version string
     # Scent Marketing AK family — spray intensity bundled into schedule
     # writes. Per @Mins95's captures the V2 firmware accepts 0-10 and the
@@ -133,7 +163,7 @@ class DiffuserState:
     intensity: int | None = None
     # Day-of-week mask for the active schedule slot. Bit layout matches
     # the AK schedule frame: bit 0 = Sun, bit 1 = Mon, ..., bit 6 = Sat.
-    # Read back from the device on connect (V2: 8301-8305, V3: C5/4A);
+    # Read back from the device on connect (V2: 8301-8305, V3: 4A);
     # used as the DD field when rebuilding schedule frames so an
     # intensity-only tweak doesn't lose the user's day pattern.
     weekday_mask: int | None = None
@@ -153,6 +183,52 @@ class DiffuserState:
     # though Power+Fan look active. On V2 this duplicates `power`
     # because V2 firmware only has the one toggle.
     schedule_enabled: bool | None = None
+    # AK V3 schedule read-back records keyed by endpoint and physical slot.
+    # This is separate from the legacy scalar fields above, which represent
+    # the current live program rather than all stored schedules.
+    ak_v3_schedules: dict[tuple[int, int], "AKSchedule"] = field(default_factory=dict)
+    # Fresh physical empty records are distinct from unavailable read data.
+    ak_v3_empty_schedules: dict[tuple[int, int], "AKSchedule"] = field(default_factory=dict)
+    # Last explicit slot transaction error, exposed on the schedule sensor so
+    # card users see a failed edit instead of a stale optimistic value.
+    ak_v3_transaction_error: str | None = None
+
+
+@dataclass(frozen=True)
+class AKSchedule:
+    """One AK V3 schedule record exactly as returned by a 4A frame."""
+
+    endpoint_id: int
+    slot_id: int
+    enabled: bool
+    start_hour: int
+    start_minute: int
+    end_hour: int
+    end_minute: int
+    days_mask: int
+    mode: int
+    intensity: int
+    work_seconds: int | None
+    pause_seconds: int | None
+    fan_state: bool | None
+    total_fan: bool
+    total_fog: bool
+    present: bool
+    active_slot_indicator: int
+    protocol_byte_2: int
+    enable_state_byte: int
+    raw_frame: bytes
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether the record has the observed empty-slot shape."""
+        return (
+            self.start_hour == 0
+            and self.start_minute == 0
+            and self.end_hour == 0
+            and self.end_minute == 0
+            and self.days_mask == 0
+        )
 
 
 @dataclass
@@ -802,7 +878,6 @@ class ScentimentProtocol(BleProtocol):
 # packets, not by device name (the app routes purely on manufacturer IDs):
 #
 #   * AK family   — 0x5943 (22851). Service FFF0 / Char FFF6. Simple bytes,
-#                   optionally with a periodic E0AA55 heartbeat.
 #   * GW family   — 0x460C (17932) or 0xF001 (61441). Service EE01 / Notify
 #                   EE02 / Write EE03. A length-prefixed data-point frame
 #                   wrapped in 18-byte chunks with a (nonce, seq) header per
@@ -830,7 +905,7 @@ class ScentMarketingAkProtocol(BleProtocol):
     write_char_uuid = SM_AK_CHAR_UUID
     notify_char_uuid = SM_AK_CHAR_UUID
 
-    def __init__(self) -> None:
+    def __init__(self, login_password: str = "8888") -> None:
         # We track the on-device control bitmask locally so a "set only the
         # power bit" command doesn't clobber lamp/fan/lock state. Updated
         # whenever the device pushes a 0x4D control-state notification.
@@ -845,6 +920,13 @@ class ScentMarketingAkProtocol(BleProtocol):
         # login frame. None = login not yet completed; True/False selects the
         # V3 vs V2 command set (different fan & schedule encodings).
         self._v3_mode: bool | None = None
+        self._v3_reply_chaining = False
+        self._login_check_password: int | None = None
+        if len(login_password) != 4:
+            raise ValueError("AK login passwords require exactly four characters")
+        self._login_password = login_password
+        self._v3_capabilities_13 = 0
+        self._v3_capabilities_14 = 0
 
     # ------------------------------------------------------------------
     # Login handshake (must complete before any other write)
@@ -860,19 +942,33 @@ class ScentMarketingAkProtocol(BleProtocol):
         """True once we've parsed any 0x8F login response."""
         return self._v3_mode is not None
 
+    @property
+    def v3_reply_chaining(self) -> bool:
+        """Whether the authenticated V3 session requires response chaining."""
+        return self._v3_reply_chaining
+
+    @property
+    def login_check_password(self) -> int | None:
+        """Return the primary login response's APK checkPassword value."""
+        return self._login_check_password
+
     def reset_login_state(self) -> None:
         """Called by the device manager before each fresh BLE connect."""
         self._v3_mode = None
+        self._v3_reply_chaining = False
+        self._login_check_password = None
+        self._v3_capabilities_13 = 0
+        self._v3_capabilities_14 = 0
 
     def build_login_primary(self) -> bytes:
         """0x8F + ASCII '8888' — the default app PIN, required before any
         other write."""
-        return SM_AK_LOGIN_PRIMARY
+        return b"\x8F" + self._login_password.encode("ascii")
 
     def build_login_secondary_v3(self) -> bytes:
         """0x8F + ASCII '8888OK01' — the V3-only follow-up login. Only send
         this after the primary response identified the device as V3."""
-        return SM_AK_LOGIN_SECONDARY_V3
+        return b"\x8F" + self._login_password.encode("ascii") + b"OK01"
 
     # ------------------------------------------------------------------
     # Control-state helpers
@@ -920,8 +1016,26 @@ class ScentMarketingAkProtocol(BleProtocol):
             # carries the correct fan byte at offset 3 instead of
             # defaulting back to 0x01 and switching the fan off.
             self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = on
-            return SM_AK_V3_FAN_ON if on else SM_AK_V3_FAN_OFF
+            return self.build_v3_aggregate_control(fan=on)
         return self._build_control(SM_AK_CTRL_BIT_FAN, on)
+
+    def build_v3_aggregate_control(
+        self, *, fan: bool | None = None, diffusion: bool | None = None, aroma: int = 1,
+    ) -> bytes:
+        """Build `2A <aroma> 02 <flags> 00` without clobbering the other flag."""
+        if not self.is_v3 or not 0 <= aroma <= 0xFF:
+            raise ValueError("AK V3 aggregate control requires a V3 session and valid aroma")
+        flags = getattr(self, "_v3_aggregate_flags", 0) & 0x03
+        if fan is not None:
+            flags = (flags & ~0x02) | (0x02 if fan else 0)
+        if diffusion is not None:
+            flags = (flags & ~0x01) | (0x01 if diffusion else 0)
+        self._v3_aggregate_flags = flags
+        return bytes([0x2A, aroma, 0x02, flags, 0x00])
+
+    def build_v3_diffusion(self, on: bool, aroma: int = 1) -> bytes:
+        """Set V3 diffusion while retaining the current aggregate fan bit."""
+        return self.build_v3_aggregate_control(diffusion=on, aroma=aroma)
 
     def supports_fan(self) -> bool:
         # The AK control bitmask carries a fan bit. We don't yet know
@@ -936,9 +1050,6 @@ class ScentMarketingAkProtocol(BleProtocol):
     def build_query(self) -> bytes:
         return bytes([SM_AK_CMD_QUERY_INFO])
 
-    def build_heartbeat(self) -> bytes:
-        return SM_AK_HEARTBEAT_BYTES
-
     def build_time_sync(self, now: datetime | None = None) -> bytes | None:
         """Time sync command for the detected protocol version.
 
@@ -946,16 +1057,15 @@ class ScentMarketingAkProtocol(BleProtocol):
         the decompiled Android app. @Mins95 confirmed this works on V2
         devices.
 
-        V3: `0x21 0x03 + YY MM DD HH MM SS` — decoded from @Mins95's
-        salon_v3 capture (`21031A05140F351C` → 2026-05-20 15:53:28).
-        Empirically required *before* the V3 read opcodes (C5/C6/C7/...)
-        produce responses, otherwise the device silently ignores them.
+        V3: `0x21 + weekday + YY MM DD HH MM SS`. This is a device
+        clock-sync write, not a diffuser-control command. On reply-chaining
+        firmware it begins the metadata response sequence.
         """
         if now is None:
             now = datetime.now()
         if self.is_v3:
             return bytes([
-                0x21, 0x03,
+                0x21, now.isoweekday() % 7,
                 now.year % 100, now.month, now.day,
                 now.hour, now.minute, now.second,
             ])
@@ -970,6 +1080,84 @@ class ScentMarketingAkProtocol(BleProtocol):
         """Port of `BtDataModel.writeDeviceName()` — UTF-8, max 16 bytes."""
         payload = name.encode("utf-8")[:16]
         return bytes([SM_AK_CMD_DEVICE_NAME, len(payload)]) + payload
+
+    @staticmethod
+    def _encode_utf8_limited(value: str, maximum_bytes: int, field: str) -> bytes:
+        """Encode complete UTF-8 text without allowing a partial character."""
+        payload = value.encode("utf-8")
+        if len(payload) > maximum_bytes:
+            raise ValueError(f"{field} must be at most {maximum_bytes} UTF-8 bytes")
+        return payload
+
+    def build_v3_device_name(self, name: str, append_name_prefix: bytes = b"") -> bytes:
+        """Build AK V3 0x22 name write, preserving the app-provided prefix."""
+        if not self.is_v3:
+            raise ValueError("AK V3 device-name writes require a V3 session")
+        payload = self._encode_utf8_limited(name, 16, "Device name")
+        return b"\x22" + bytes(append_name_prefix) + payload
+
+    def build_v3_device_label(self, label: str) -> bytes:
+        """Build AK V3 0x23 label write without changing UTF-8 data."""
+        if not self.is_v3:
+            raise ValueError("AK V3 label writes require a V3 session")
+        return b"\x23" + label.encode("utf-8")
+
+    def build_v3_oil_names(self, names: list[str]) -> bytes:
+        """Build the fixed-width AK V3 0x28 fragrance-name table."""
+        if not self.is_v3 or not names:
+            raise ValueError("AK V3 oil-name writes require one or more aromas")
+        frame = bytearray(1 + len(names) * 16)
+        frame[0] = 0x28
+        for index, name in enumerate(names):
+            payload = self._encode_utf8_limited(name, 16, "Fragrance name")
+            offset = 1 + index * 16
+            frame[offset:offset + len(payload)] = payload
+        return bytes(frame)
+
+    def build_v3_oil_amounts(
+        self, status_byte: int, amounts: list[tuple[int, int]],
+    ) -> bytes:
+        """Build AK V3 0x2B capacity/current records in aroma-array order."""
+        if not self.is_v3 or not amounts:
+            raise ValueError("AK V3 oil amounts require one or more aromas")
+        if not 0 <= status_byte <= 0xFF:
+            raise ValueError("Invalid AK V3 oil status byte")
+        frame = bytearray([0x2B, status_byte])
+        for total, remaining in amounts:
+            if not 0 <= total <= 0xFFFF or not 0 <= remaining <= total:
+                raise ValueError("Oil amounts must be unsigned and remaining cannot exceed capacity")
+            frame.extend(total.to_bytes(2, "big"))
+            frame.extend(remaining.to_bytes(2, "big"))
+        return bytes(frame)
+
+    def build_v3_oil_calculations(
+        self, calculations: list[tuple[float, int]],
+    ) -> bytes:
+        """Build AK V3 0x30 seven-byte flow/day records in aroma-array order."""
+        if not self.is_v3 or not calculations:
+            raise ValueError("AK V3 oil calculations require one or more aromas")
+        frame = bytearray([0x30])
+        for flow, days in calculations:
+            try:
+                value = Decimal(str(flow))
+            except (InvalidOperation, ValueError) as err:
+                raise ValueError("Invalid oil flow") from err
+            if value < 0 or value > Decimal("655.35") or value.as_tuple().exponent < -2:
+                raise ValueError("Oil flow must be between 0.00 and 655.35 mL/h with at most two decimals")
+            encoded_flow = int((value * 100).to_integral_value())
+            if not 0 <= days <= 0xFFFF:
+                raise ValueError("Estimated days must be an unsigned 16-bit value")
+            frame.extend(b"\x00")
+            frame.extend(encoded_flow.to_bytes(2, "big"))
+            frame.extend(days.to_bytes(2, "big"))
+            frame.extend(b"\x00\x00")
+        return bytes(frame)
+
+    def build_v3_password_change(self, password: str) -> bytes:
+        """Build the AK V3 password command; callers must protect this write."""
+        if not self.is_v3 or len(password) != 4:
+            raise ValueError("AK V3 passwords require exactly four characters")
+        return b"\x0F" + password.encode("utf-8") + b"OK01"
 
     def build_oil_amount(self, remaining: int, battery_pct: int) -> bytes:
         """Port of `BtDataModel.writeOilAmount()`."""
@@ -1004,6 +1192,88 @@ class ScentMarketingAkProtocol(BleProtocol):
                 custom_mode=custom_mode,
             )
         return self._build_schedule_v2(slot, weekday_mask, index, intensity)
+
+    def build_v3_schedule_update(
+        self,
+        schedule: AKSchedule,
+        *,
+        enabled: bool | None = None,
+        start_hour: int | None = None,
+        start_minute: int | None = None,
+        end_hour: int | None = None,
+        end_minute: int | None = None,
+        days_mask: int | None = None,
+        mode: int | None = None,
+        intensity: int | None = None,
+        work_seconds: int | None = None,
+        pause_seconds: int | None = None,
+    ) -> bytes:
+        """Clone one AK V3 schedule, changing only explicitly supplied fields.
+
+        Identity comes solely from the read-back endpoint and slot fields.
+        Unknown V3 framing fields are preserved from that same record; this
+        prevents an edit from being redirected by a day pattern or timing.
+        """
+        if not self.is_v3:
+            raise ValueError("AK V3 schedule updates require a V3 session")
+        if not 1 <= schedule.endpoint_id <= 0xFF or not 1 <= schedule.slot_id <= 5:
+            raise ValueError("Invalid AK V3 schedule identity")
+        if (
+            schedule.protocol_byte_2 != 0x02
+            or schedule.fan_state is None
+            or not 0 <= schedule.enable_state_byte <= 0x07
+        ):
+            raise ValueError("Incomplete AK V3 schedule read-back")
+
+        resolved_enabled = schedule.enabled if enabled is None else enabled
+        values = (
+            schedule.start_hour if start_hour is None else start_hour,
+            schedule.start_minute if start_minute is None else start_minute,
+            schedule.end_hour if end_hour is None else end_hour,
+            schedule.end_minute if end_minute is None else end_minute,
+            schedule.days_mask if days_mask is None else days_mask,
+            schedule.mode if mode is None else mode,
+            schedule.intensity if intensity is None else intensity,
+            schedule.work_seconds if work_seconds is None else work_seconds,
+            schedule.pause_seconds if pause_seconds is None else pause_seconds,
+        )
+        start_h, start_m, end_h, end_m, days, mode_byte, level, work, pause = values
+        if not all(value is not None for value in values):
+            raise ValueError("Incomplete AK V3 schedule read-back")
+        if not (0 <= start_h <= 23 and 0 <= end_h <= 23 and 0 <= start_m <= 59 and 0 <= end_m <= 59):
+            raise ValueError("Invalid AK V3 schedule time")
+        if not (0 <= days <= 0x7F and mode_byte in (0, 1) and 0 <= level <= 20):
+            raise ValueError("Invalid AK V3 schedule fields")
+        if not (0 <= work <= 0xFFFF and 0 <= pause <= 0xFFFF):
+            raise ValueError("Invalid AK V3 schedule durations")
+
+        frame = bytes([
+            SM_AK_CMD_SCHEDULE_V3,
+            schedule.endpoint_id,
+            schedule.protocol_byte_2,
+            schedule.raw_frame[3],
+            schedule.active_slot_indicator,
+            schedule.slot_id,
+            (schedule.enable_state_byte & 0x05) | (0x02 if resolved_enabled else 0x00),
+            start_h, start_m, end_h, end_m, days, mode_byte, level,
+            work >> 8, work & 0xFF, pause >> 8, pause & 0xFF,
+        ])
+        # Custom-schedule capability determines the wire length, independent
+        # of the selected fixed/custom mode for this particular slot.
+        return frame if self._v3_capabilities_13 & 0x04 else frame[:14]
+
+    def build_v3_schedule_delete(self, schedule: AKSchedule) -> bytes:
+        """Clear an occupied V3 slot without changing its identity or fan bit."""
+        if not self.is_v3 or schedule.protocol_byte_2 != 0x02:
+            raise ValueError("AK V3 schedule delete requires a V3 schedule")
+        # Delete clears only present/enabled bits. The runtime-fan bit is kept.
+        frame = bytes([
+            0x2A, schedule.endpoint_id, schedule.protocol_byte_2,
+            schedule.raw_frame[3], schedule.active_slot_indicator, schedule.slot_id,
+            schedule.enable_state_byte & 0x04,
+            0, 0, 0, 0, 0, 0, 0,
+        ])
+        return frame + b"\x00\x00\x00\x00" if self._v3_capabilities_13 & 0x04 else frame
 
     @staticmethod
     def _build_schedule_v2(
@@ -1124,16 +1394,15 @@ class ScentMarketingAkProtocol(BleProtocol):
     def build_read_schedule_queries(self) -> list[bytes]:
         """Frames to send after login to read the device's schedule state.
 
-        V2: poll slots 1..5 individually with `83 SS`. V3: a single `C5`
-        triggers the device to push one `4A...` per slot asynchronously.
+        V2: poll slots 1..5 individually with `83 SS`. V3 table reads use the
+        response-driven reader owned by the device manager.
         """
         if self.is_v3:
-            return [bytes([SM_AK_CMD_V3_READ_SCHEDULES])]
+            return []
         return [bytes([SM_AK_CMD_READ_SCHEDULE_V2, i]) for i in range(1, 6)]
 
     def build_read_state_queries(self) -> list[bytes]:
-        """Frames to read non-schedule device state (power/fan, label,
-        firmware, model). Different opcodes per protocol version.
+        """Frames to read non-schedule device state in APK-defined order.
 
         These are useful but non-essential — schedule state is the
         priority for state restoration on restart. The returned frames
@@ -1145,8 +1414,10 @@ class ScentMarketingAkProtocol(BleProtocol):
                 bytes([SM_AK_CMD_V3_READ_NAME]),
                 bytes([SM_AK_CMD_V3_READ_LABEL]),
                 bytes([SM_AK_CMD_V3_READ_FIRMWARE]),
-                bytes([SM_AK_CMD_V3_READ_CONTROL]),
                 bytes([SM_AK_CMD_V3_READ_MODEL]),
+                bytes([SM_AK_CMD_V3_READ_LIMITS]),
+                bytes([SM_AK_CMD_V3_READ_GRADE_TABLE]),
+                bytes([SM_AK_CMD_V3_READ_FRAGRANCES]),
                 # Oil block (@Mins95's #18 decode): C8 → 4B max/current ml,
                 # CE → 50 enabled/consumption/days/current. Without these
                 # the oil sensors stay null.
@@ -1161,7 +1432,7 @@ class ScentMarketingAkProtocol(BleProtocol):
         ]
 
     def build_grade_table_query(self) -> bytes:
-        """C3 query for the V3 Level grade table (→ 0x47).
+        """C6 query for the V3 Level grade table (→ 0x47).
 
         Sent on its own, *immediately after* the schedule read-back and
         *before* the label / oil / firmware reads — this mirrors the official
@@ -1180,29 +1451,7 @@ class ScentMarketingAkProtocol(BleProtocol):
     # ------------------------------------------------------------------
 
     def wire_chunks(self, frame: bytes) -> list[bytes]:
-        """Append the V3 'commit' frame after state-changing writes.
-
-        On V3 devices, the official app follows certain writes with a
-        separate `E0AA55` frame; without it, the device acknowledges the
-        command at the GATT layer but doesn't actually apply it. Per the
-        captures from @Mins95 the commit is sent after power-on, fan, and
-        schedule writes — but not after power-off.
-        """
-        if not frame or not self.is_v3:
-            return [frame]
-
-        op = frame[0] & 0xFF
-        needs_commit = False
-        if op == SM_AK_CMD_CONTROL_STATE and len(frame) >= 2:
-            # Only commit on writes that turn ONOFF *on*. Mirrors the
-            # captured pattern: 2D1B (power-on) → commit, 2D1A (off) → no
-            # commit.
-            needs_commit = bool(frame[1] & (1 << SM_AK_CTRL_BIT_ONOFF))
-        elif op == SM_AK_CMD_SCHEDULE_V3:
-            needs_commit = True
-
-        if needs_commit:
-            return [frame, SM_AK_V3_COMMIT]
+        """Send each supported AK frame exactly once."""
         return [frame]
 
     # ------------------------------------------------------------------
@@ -1226,6 +1475,27 @@ class ScentMarketingAkProtocol(BleProtocol):
             payload = bytes(data[1:])
             if b"V3" in payload:
                 self._v3_mode = True
+                # The APK treats its short eight-byte V3 reply as
+                # checkPassword == 3, which immediately requires OK01.
+                # Longer replies carry checkPassword before capabilities.
+                self._login_check_password = 3 if len(data) <= 8 else data[12]
+                capabilities_13 = data[13] if len(data) > 13 else 0
+                capabilities_14 = data[14] if len(data) > 14 else 0
+                self._v3_capabilities_13 = capabilities_13
+                self._v3_capabilities_14 = capabilities_14
+                self._v3_reply_chaining = bool(capabilities_14 & 0x80)
+                result["ak_v3_capabilities"] = (capabilities_13 << 8) | capabilities_14
+                result["ak_v3_has_oil"] = bool(capabilities_13 & 0x01)
+                result["ak_v3_has_battery"] = bool(capabilities_13 & 0x02)
+                result["ak_v3_has_custom_mode"] = bool(capabilities_13 & 0x04)
+                result["ak_v3_has_aromas"] = bool(capabilities_13 & 0x08)
+                result["ak_v3_has_fan"] = bool(capabilities_13 & 0x10)
+                result["ak_v3_has_round_battery"] = bool(capabilities_13 & 0x80)
+                result["ak_v3_has_lamp"] = bool(capabilities_14 & 0x10)
+                result["ak_v3_has_global_control"] = bool(capabilities_14 & 0x40)
+                result["ak_v3_reply_chaining"] = self._v3_reply_chaining
+                if len(data) > 17:
+                    result["ak_v3_lamp_type"] = data[17]
             elif b"V2" in payload:
                 self._v3_mode = False
             return result
@@ -1246,12 +1516,12 @@ class ScentMarketingAkProtocol(BleProtocol):
             result["power"] = self._ctrl_bits[SM_AK_CTRL_BIT_ONOFF]
             result["phase"] = "idle" if result["power"] else "off"
             result["lock"] = self._ctrl_bits[SM_AK_CTRL_BIT_LOCK]
+            self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = bool(mask & (1 << SM_AK_CTRL_BIT_FAN))
+            result["fan_active"] = self._ctrl_bits[SM_AK_CTRL_BIT_FAN]
             if not is_v3_frame:
-                # Legacy V2 path — bitmask is the source of truth.
-                self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = bool(mask & (1 << SM_AK_CTRL_BIT_FAN))
+                # Legacy V2 also reports demo and lamp in this bitmask.
                 self._ctrl_bits[SM_AK_CTRL_BIT_DEMO] = bool(mask & (1 << SM_AK_CTRL_BIT_DEMO))
                 self._ctrl_bits[SM_AK_CTRL_BIT_LAMP] = bool(mask & (1 << SM_AK_CTRL_BIT_LAMP))
-                result["fan"] = self._ctrl_bits[SM_AK_CTRL_BIT_FAN]
                 result["light_on"] = self._ctrl_bits[SM_AK_CTRL_BIT_LAMP]
 
         elif op == 0x4B and len(data) >= 6:  # oil block (C8 response)
@@ -1259,6 +1529,9 @@ class ScentMarketingAkProtocol(BleProtocol):
             # e.g. 4B0003520258 = 850 ml capacity, 600 ml current → 71%.
             max_ml = (data[2] << 8) | data[3]
             current_ml = (data[4] << 8) | data[5]
+            result["oil_status_byte"] = data[1]
+            if self._v3_capabilities_13 & 0x02:
+                result["battery"] = data[1]
             if max_ml > 0:
                 result["oil_max_ml"] = max_ml
                 result["oil_current_ml"] = current_ml
@@ -1266,7 +1539,7 @@ class ScentMarketingAkProtocol(BleProtocol):
 
         elif op == 0x50 and len(data) >= 8:  # oil info (CE response)
             # @Mins95's #18 decode:
-            #   `50 <enabled> <consumption×100 u16> <field u16> <field u16>`
+            #   `50 <saved> <flow×100 u16> <stored_days u16> <old_oil u16>`
             # Only the consumption rate is trustworthy here. The 4B frame is
             # the single source of truth for current_ml / max_ml / percentage
             # — @Mins95's beta.7 test (#8) showed 4B reporting 584 ml (and the
@@ -1276,9 +1549,23 @@ class ScentMarketingAkProtocol(BleProtocol):
             # from oil / consumption / schedule / duty-cycle rather than
             # reading a raw field (his device reported 836 vs the app's 293),
             # so we derive it ourselves in device.py and ignore this value.
-            consumption = (data[2] << 8) | data[3]
-            if consumption > 0:
-                result["oil_consumption_mlh"] = consumption / 100.0
+            records = []
+            for offset in range(1, len(data) - 6, 7):
+                enabled = bool(data[offset])
+                consumption = (data[offset + 1] << 8) | data[offset + 2]
+                stored_days = (data[offset + 3] << 8) | data[offset + 4]
+                # The device-provided day count is retained for calibration and
+                # diagnostics only. device.py derives the exposed days value.
+                old_oil = (data[offset + 5] << 8) | data[offset + 6]
+                records.append((enabled, consumption / 100.0, stored_days, old_oil))
+            if records:
+                result["oil_calculation_records"] = records
+                enabled, consumption, _stored_days, old_oil = next(
+                    (record for record in records if record[0]), records[0]
+                )
+                if consumption > 0:
+                    result["oil_consumption_mlh"] = consumption
+                result["oil_old_calibration_ml"] = old_oil
 
         elif op == SM_AK_RESP_GRADE_TABLE and len(data) >= 5:
             # V3 Level grade table, response to C3 (@Mins95's #8 decode):
@@ -1304,6 +1591,27 @@ class ScentMarketingAkProtocol(BleProtocol):
                     table.append(None)
             if any(t is not None for t in table):
                 result["grade_table"] = table
+
+        elif op == 0x46 and len(data) >= 10:
+            # Some live firmwares append extension bytes after the documented
+            # nine-byte limits payload. The APK consumes the leading fields.
+            result["grade_limits"] = (
+                data[1],
+                (data[2] << 8) | data[3],
+                (data[4] << 8) | data[5],
+                (data[6] << 8) | data[7],
+                (data[8] << 8) | data[9],
+            )
+
+        elif op == 0x51 and len(data) >= 4 and self._v3_capabilities_14 & 0x10:
+            result["light_on"] = bool(data[3])
+
+        elif op == 0x52:
+            # Diagnostic protocol identity only. It must never replace the
+            # configured Bluetooth address or Home Assistant device identity.
+            identity = bytes(data[1:]).rstrip(b"\x00").decode("utf-8", errors="replace").strip()
+            if identity:
+                result["ak_v3_protocol_identity"] = identity
 
         elif op == 0x83 and len(data) >= 8:
             # V2 schedule slot read-back. Layout matches the write but
@@ -1333,32 +1641,14 @@ class ScentMarketingAkProtocol(BleProtocol):
                 result["schedule_enabled"] = True
 
         elif op == SM_AK_RESP_SCHEDULE_V3 and len(data) >= 14:
-            # Offset 1 is the diffuser endpoint. Single-pump units report
-            # a constant 01 here, but multi-pump models like the A309
-            # carry three independently programmable diffusers and push
-            # one set of slots per endpoint — 15 frames in total
-            # (@danieledwardgeorgehitchcock, #22). Absorbing all of them
-            # into one state means endpoint 2 and 3 overwrite endpoint
-            # 1's schedule, so HA displays the last endpoint that
-            # happened to push while our writes (2A 01 …) still go to the
-            # first one: the user edits something other than what they
-            # see.
-            #
-            # Until each endpoint gets its own entities, keep to the one
-            # we actually write to. Skip only endpoints above the first,
-            # so a variant that numbers its sole pump 00 still works.
-            if data[1] > SM_AK_V3_PRIMARY_ENDPOINT:
-                return result
-
-            # V3 schedule slot read-back, response to C5 / CA01XX:
+            # V3 schedule slot read-back:
             #     4A 01 02 FF FE SS EE HH MM HH MM DD 00 LL 00 0F 01 2C
-            # where FF (offset 3) carries the fan state and FE (offset
-            # 4) tracks whether the schedule is currently enabled.
-            # @Mins95's enabled/disabled comparison captures pinned this
-            # down: on-the-wire fan and program state are mirrored in
-            # the read-back, with read/write semantics for EE inverted
-            # (write: 01=enable / 03=disable; read: 03=enabled / 01=
-            # disabled).
+            # The data[6] state mask is 0b00000FEP: bit 2 is fan, bit 1 is
+            # enabled, and bit 0 is show/present. Only its low three bits are
+            # valid. This is an
+            # implementation mapping, not proof that toggling it is safe;
+            # device writes remain guarded until captured disable/re-enable
+            # evidence verifies the behavior.
             # Trailer (offsets 14..17) = work / pause durations, each a
             # big-endian u16 — the same encoding we now write. Surface
             # them so the Work / Pause Duration entities reflect what the
@@ -1368,6 +1658,7 @@ class ScentMarketingAkProtocol(BleProtocol):
             if len(data) >= 18:
                 work_seconds = (data[14] << 8) | data[15]
                 pause_seconds = (data[16] << 8) | data[17]
+            result["ak_v3_schedule"] = self._parse_v3_schedule(data)
             self._absorb_schedule(
                 slot_index=data[5],
                 start_hour=data[7], start_minute=data[8],
@@ -1378,23 +1669,17 @@ class ScentMarketingAkProtocol(BleProtocol):
                 work_seconds=work_seconds,
                 pause_seconds=pause_seconds,
             )
+            # Byte 3 is aroma-level state, independent of the slot's occupancy.
+            result["total_fan"] = bool(data[3] & 0x02)
+            result["diffusion_enabled"] = bool(data[3] & 0x01)
+            self._v3_aggregate_flags = data[3] & 0x03
             # The V3 device pushes one 4A per slot, and most are empty
-            # placeholders (all-zero times + mask). Only derive live
-            # device state (fan, program-enabled, mode) from a slot that
-            # actually carries a schedule — otherwise a trailing empty
-            # slot clobbers the real one's values back to off/false
-            # (@Mins95 saw schedule_enabled flip to false this way, #8).
+            # placeholders. Derive slot-level state only from populated slots.
             slot_empty = (
                 data[7] == 0 and data[8] == 0 and data[9] == 0
                 and data[10] == 0 and data[11] == 0
             )
             if not slot_empty:
-                # V3 fan state is authoritative on read-back; it overrides
-                # the 4D bitmask (V3's 4D 01 FF reports all bits set).
-                if data[3] in (0x01, 0x03):
-                    fan_now = data[3] == 0x03
-                    result["fan"] = fan_now
-                    self._ctrl_bits[SM_AK_CTRL_BIT_FAN] = fan_now
                 # Offset 12 = Custom/Level mode selector (01 = Custom,
                 # 00 = Level), NOT the enabled flag — @Mins95's #8
                 # Level↔Custom differential confirmed this. Surface it so
@@ -1402,9 +1687,8 @@ class ScentMarketingAkProtocol(BleProtocol):
                 # switch stops mistaking Level mode for "disabled").
                 result["schedule_custom_mode"] = data[12] == 0x01
                 # Program-enabled: data[4] = "active slot" indicator (slot
-                # ID when genuinely live, 0 otherwise); data[6] = EE, whose
-                # bit1 (0x02) carries enabled. @Mins95's V3 uses 0x03/0x01,
-                # christiandion's Flair 0x07/0x05 — same bit1 meaning.
+                # ID when genuinely live, 0 otherwise); data[6] bit1 carries
+                # enabled.
                 active_slot = data[4] != 0
                 ee_enabled = bool(data[6] & 0x02)
                 result["schedule_enabled"] = active_slot and ee_enabled
@@ -1413,9 +1697,13 @@ class ScentMarketingAkProtocol(BleProtocol):
             # V3 reply to C6: `42 <utf8 name bytes…>`. Name is variable
             # length, no explicit length prefix.
             try:
-                name = bytes(data[1:]).decode("utf-8", errors="replace").rstrip("\x00").strip()
+                name = bytes(data[1:]).decode("utf-8", errors="replace").rstrip("\x00")
                 if name:
                     result["device_name"] = name
+                    # Ultra Max Tower's readable name includes this app/device
+                    # prefix, while 0x22 accepts only the editable suffix.
+                    if name.startswith("SA_"):
+                        result["device_name_append_prefix"] = b"SA_"
             except Exception:
                 pass
 
@@ -1431,13 +1719,20 @@ class ScentMarketingAkProtocol(BleProtocol):
                 pass
 
         elif op == SM_AK_RESP_LABEL_V3 and len(data) >= 2:
-            # V3 reply to C7: `48 <16 utf8 bytes, zero-padded>`. We
-            # surface it as the device_name fallback when no name has
-            # come through yet — it's the user-visible "scene name" in
-            # the official app (e.g. "Evasion").
-            label = bytes(data[1:]).rstrip(b"\x00").decode("utf-8", errors="replace").strip()
+            # V3 reply to C2: `43 <utf8 label bytes…>`.
+            label = bytes(data[1:]).rstrip(b"\x00").decode("utf-8", errors="replace")
             if label:
-                result.setdefault("device_label", label)
+                result["device_label"] = label
+
+        elif op == SM_AK_RESP_FRAGRANCES_V3 and len(data) >= 17:
+            # V3 reply to C7: `48 <name_0[16]> <name_1[16]> ...`. Preserve
+            # record order and only remove the fixed-record NUL padding.
+            payload = bytes(data[1:])
+            if len(payload) % 16 == 0:
+                result["oil_names"] = [
+                    payload[offset:offset + 16].decode("utf-8", errors="replace").rstrip("\x00")
+                    for offset in range(0, len(payload), 16)
+                ]
 
         elif op == SM_AK_RESP_MODEL_V3 and len(data) >= 2:
             # V3 reply to D0: `45 <utf8 model code>` (e.g. "A305M").
@@ -1467,6 +1762,37 @@ class ScentMarketingAkProtocol(BleProtocol):
                 result.setdefault("firmware_version", version)
 
         return result
+
+    @staticmethod
+    def _parse_v3_schedule(data: bytes) -> AKSchedule:
+        """Decode one complete V3 4A frame without discarding slot identity."""
+        work_seconds = pause_seconds = None
+        if len(data) >= 18:
+            work_seconds = (data[14] << 8) | data[15]
+            pause_seconds = (data[16] << 8) | data[17]
+        enable_state_byte = data[6]
+        return AKSchedule(
+            endpoint_id=data[1],
+            slot_id=data[5],
+            enabled=bool(enable_state_byte & 0x02),
+            start_hour=data[7],
+            start_minute=data[8],
+            end_hour=data[9],
+            end_minute=data[10],
+            days_mask=data[11],
+            mode=data[12],
+            intensity=data[13],
+            work_seconds=work_seconds,
+            pause_seconds=pause_seconds,
+            fan_state=bool(enable_state_byte & 0x04),
+            total_fan=bool(data[3] & 0x02),
+            total_fog=bool(data[3] & 0x01),
+            present=bool(enable_state_byte & 0x01),
+            active_slot_indicator=data[4],
+            protocol_byte_2=data[2],
+            enable_state_byte=enable_state_byte,
+            raw_frame=bytes(data),
+        )
 
     def _absorb_schedule(
         self,
@@ -1504,9 +1830,9 @@ class ScentMarketingAkProtocol(BleProtocol):
         result["intensity"] = max(0, min(ceiling, intensity & 0xFF))
         # Work / pause durations (V3 trailer). Only surface plausible
         # values — uninitialised read-back slots can carry junk here.
-        if work_seconds is not None and 0 < work_seconds <= 0xFFFF:
+        if work_seconds is not None and 0 <= work_seconds <= 0xFFFF:
             result["work_seconds"] = work_seconds
-        if pause_seconds is not None and 0 < pause_seconds <= 0xFFFF:
+        if pause_seconds is not None and 0 <= pause_seconds <= 0xFFFF:
             result["pause_seconds"] = pause_seconds
 
 
@@ -2039,6 +2365,7 @@ def get_protocol(
     device_type: DeviceType,
     mac: str = "",
     pid: int | None = None,
+    ak_password: str = "8888",
 ) -> BleProtocol:
     """Get the appropriate protocol handler for a device type.
 
@@ -2053,7 +2380,7 @@ def get_protocol(
     elif device_type == DeviceType.SCENTIMENT:
         return ScentimentProtocol()
     elif device_type == DeviceType.SCENT_MARKETING_AK:
-        return ScentMarketingAkProtocol()
+        return ScentMarketingAkProtocol(ak_password)
     elif device_type == DeviceType.SCENT_MARKETING_GW:
         return ScentMarketingGwProtocol(tuya_dp_mode=tuya)
     elif device_type == DeviceType.SCENT_MARKETING_GW_XOR:

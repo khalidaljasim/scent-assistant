@@ -72,3 +72,250 @@ set_schedule:
       default: true
       selector:
         boolean:
+diagnose_ak_v3_schedule_table:
+  name: Diagnose AK V3 Schedule Table
+  description: >-
+    Read the physical schedule table through the response-driven AK sequence.
+    This service never writes or updates Home Assistant state.
+  fields:
+    config_entry_id:
+      name: Config Entry ID
+      description: Scent Assistant config entry ID.
+      required: true
+      selector:
+        text:
+    endpoint:
+      name: Endpoint
+      description: AK V3 endpoint ID.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 255
+          mode: box
+    source:
+      name: Source
+      description: >-
+        physical performs a new response-driven BLE read. committed returns only
+        the current-generation table already committed in memory and never uses BLE.
+      required: false
+      default: physical
+      selector:
+        select:
+          options:
+            - physical
+            - committed
+update_ak_v3_slot:
+  name: Update AK V3 Schedule Slot
+  description: >-
+    Update one existing AK V3 schedule slot. Keep rollback on failure enabled
+    unless a controlled external restoration flow owns rollback.
+  fields:
+    config_entry_id:
+      name: Config Entry ID
+      required: true
+      selector:
+        text:
+    endpoint:
+      name: Endpoint
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 255
+          mode: box
+    slot:
+      name: Slot
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 5
+          mode: box
+    rollback_on_failure:
+      name: Roll Back on Failure
+      description: >-
+        Restore the action baseline after an unsuccessful physical verification.
+        Disable only when an external controller owns the single restoration write.
+      required: false
+      default: true
+      selector:
+        boolean:
+verify_ak_v3_slot_lifecycle:
+  name: Verify AK V3 Slot Lifecycle
+  description: >-
+    Protected destructive verification: baseline an empty slot, create it,
+    read it, delete it, and read it again. On failure the integration attempts
+    to restore and verify the original empty record. This service is not a
+    public create/delete control.
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        text:
+    confirmation:
+      required: true
+      selector:
+        text:
+    enabled:
+      required: true
+      selector:
+        boolean:
+    start_hour:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 23
+          mode: box
+    start_minute:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 59
+          mode: box
+    end_hour:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 23
+          mode: box
+    end_minute:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 59
+          mode: box
+    days_mask:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 127
+          mode: box
+    mode:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 1
+          mode: box
+    intensity:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 20
+          mode: box
+    work_seconds:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    pause_seconds:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    cycles:
+      name: Cycles
+      description: Repeated response-driven table reads, bounded to 1 through 3.
+      required: false
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 3
+          mode: box
+set_ak_v3_device_name:
+  name: Set AK V3 Device Name
+  description: Writes the confirmed AK V3 0x22 device-name frame and then requests a fresh name read.
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        text:
+    value:
+      required: true
+      selector:
+        text:
+set_ak_v3_device_label:
+  name: Set AK V3 Device Label
+  description: Writes the confirmed AK V3 0x23 label frame and then requests a fresh label read.
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        text:
+    value:
+      required: true
+      selector:
+        text:
+set_ak_v3_oil_name:
+  name: Set AK V3 Fragrance Name
+  description: Writes the fixed-width AK V3 0x28 fragrance-name table. No fragrance-name read-back is confirmed.
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        text:
+    value:
+      required: true
+      selector:
+        text:
+set_ak_v3_oil:
+  name: Set AK V3 Oil Values
+  description: Writes 0x2B oil amounts, waits 200 ms, writes 0x30 calculation data, then requests fresh oil reads.
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        text:
+    total_ml:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    remaining_ml:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    flow_mlh:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 655.35
+          step: 0.01
+          mode: box
+calibrate_ak_v3_oil:
+  name: Calibrate AK V3 Oil
+  description: Records a measured remaining amount and sends the normal 0x2B then 0x30 calibration sequence.
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        text:
+    actual_remaining_ml:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    confirmation:
+      required: true
+      selector:
+        text:
