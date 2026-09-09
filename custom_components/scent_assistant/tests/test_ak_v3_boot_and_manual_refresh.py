@@ -141,6 +141,17 @@ class AKV3BootAndManualRefreshTest(unittest.IsolatedAsyncioTestCase):
         device._protocol = PROTOCOL.ScentMarketingGwProtocol()
         self.assertFalse(await device.async_refresh_ak_v3_state())
 
+    def test_retained_schedule_and_fan_fields_survive_an_intentional_disconnect(self):
+        device = self._device()
+        device._device_type = DEVICE.DeviceType.SCENT_MARKETING_AK
+        device._ak_v3_current_fields = {"schedules", "fan_aggregate"}
+        device._ak_v3_retained_generation = device._ak_v3_startup_generation
+        device._ak_v3_retained_fields = {"schedules", "fan_aggregate"}
+        device._ble_connected = False
+        device._ble_notify_subscribed = False
+
+        self.assertTrue(device.ak_v3_read_available("schedules", "fan_aggregate"))
+
     async def test_startup_waits_for_metadata_and_direct_collector(self):
         device = self._device()
         chain = DEVICE.AKV3StartupChain(1, post_21_sent=True)

@@ -113,6 +113,11 @@ class DiffuserStatusSensor(SensorEntity):
 
     @property
     def available(self) -> bool:
+        if (
+            self._device.device_type == DeviceType.SCENT_MARKETING_AK
+            and self._device.protocol_is_v3
+        ):
+            return self._device.ak_v3_read_available("schedules", "fan_aggregate")
         return self._device.available
 
 

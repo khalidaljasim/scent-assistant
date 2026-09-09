@@ -123,7 +123,13 @@ class RefreshDiffuserStateButton(ButtonEntity):
 
     @property
     def available(self) -> bool:
-        return self._device.ak_v3_manual_refresh_available
+        # Keep this diagnostic button stable while another AK V3 action owns
+        # the BLE session. async_press retains the runtime busy guard.
+        return (
+            self._device.is_ak_protocol
+            and self._device.protocol_is_v3
+            and bool(self._device._ble_address)
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, str | None]:

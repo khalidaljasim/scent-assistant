@@ -56,6 +56,38 @@ def _load_button_module():
 BUTTON = _load_button_module()
 
 
+def _load_sensor_module():
+    homeassistant = sys.modules["homeassistant"]
+    components = sys.modules["homeassistant.components"]
+    sensor = types.ModuleType("homeassistant.components.sensor")
+    sensor.SensorEntity = object
+    sensor.SensorDeviceClass = SimpleNamespace(BATTERY="battery", DURATION="duration")
+    sensor.SensorStateClass = SimpleNamespace(MEASUREMENT="measurement")
+    const = sys.modules["homeassistant.const"]
+    const.PERCENTAGE = "%"
+    const.UnitOfTime = SimpleNamespace(SECONDS="s")
+    components.sensor = sensor
+    sys.modules["homeassistant.components.sensor"] = sensor
+    return importlib.import_module("custom_components.scent_assistant.sensor")
+
+
+def _load_number_module():
+    homeassistant = sys.modules["homeassistant"]
+    components = sys.modules["homeassistant.components"]
+    number = types.ModuleType("homeassistant.components.number")
+    number.NumberEntity = object
+    number.NumberMode = SimpleNamespace(BOX="box", SLIDER="slider")
+    const = sys.modules["homeassistant.const"]
+    const.EntityCategory.CONFIG = "config"
+    components.number = number
+    sys.modules["homeassistant.components.number"] = number
+    return importlib.import_module("custom_components.scent_assistant.number")
+
+
+SENSOR = _load_sensor_module()
+NUMBER = _load_number_module()
+
+
 def _schedule(slot: int, mode: int = 0):
     return PROTOCOL.ScentMarketingAkProtocol._parse_v3_schedule(bytes([
         0x4A, 1, 0x02, 0x03, slot, slot, 0x03,
@@ -65,13 +97,13 @@ def _schedule(slot: int, mode: int = 0):
 
 class _Device:
     available = True
-    protocol_is_v3 = True
     unique_id = "ultra_max_tower"
     name = "Ultra Max Tower"
     device_info = {}
     supports_ak_v3_custom_mode = False
     ak_v3_manual_refresh_available = True
     device_type = DEVICE.DeviceType.SCENT_MARKETING_AK
+    _ble_address = "00:11:22:33:44:55"
 
     def __init__(self) -> None:
         self.state = PROTOCOL.DiffuserState()
@@ -79,16 +111,25 @@ class _Device:
         self.updated = []
         self._sm_metadata = {}
         self._protocol = PROTOCOL.ScentMarketingAkProtocol()
+        self.retained_read_available = True
 
     @property
     def sm_metadata(self):
         return self._sm_metadata
 
+    @property
+    def is_ak_protocol(self) -> bool:
+        return isinstance(self._protocol, PROTOCOL.ScentMarketingAkProtocol)
+
+    @property
+    def protocol_is_v3(self) -> bool:
+        return self._protocol.is_v3 if self.is_ak_protocol else False
+
     def register_state_callback(self, _callback) -> None:
         pass
 
     def ak_v3_read_available(self, *_fields) -> bool:
-        return self.available
+        return self.retained_read_available
 
     async def async_update_ak_v3_slot(self, endpoint, slot, **changes) -> None:
         self.updated.append((endpoint, slot, changes))
@@ -195,12 +236,32 @@ class AKV3EntityContractsTest(unittest.IsolatedAsyncioTestCase):
         refresh = BUTTON.RefreshDiffuserStateButton(self.device, None)
         self.assertFalse(refresh.available)
         self.device._protocol._v3_mode = True
-        self.device.ak_v3_manual_refresh_available = True
         self.assertTrue(refresh.available)
+
+    async def test_refresh_availability_does_not_follow_a_busy_schedule_action(self):
+        self.device._protocol._v3_mode = True
+        self.device.ak_v3_manual_refresh_available = False
+        refresh = BUTTON.RefreshDiffuserStateButton(self.device, None)
+
+        self.assertTrue(refresh.available)
+
+    def test_v3_status_remains_available_from_retained_schedule_and_fan_state(self):
+        self.device._protocol._v3_mode = True
+        self.device.available = False
+        status = SENSOR.DiffuserStatusSensor(self.device, None)
+
+        self.assertTrue(status.available)
+
+    def test_global_intensity_stays_unavailable_without_a_live_source(self):
+        self.device._protocol._v3_mode = True
+        self.device.state.intensity = None
+        intensity = NUMBER.ScentMarketingIntensityNumber(self.device, None)
+
+        self.assertFalse(intensity.available)
 
     async def test_non_ak_entries_receive_an_unavailable_refresh_entity(self):
         self.device._sm_metadata = {"mfr_id": 0x1234}
-        self.device.ak_v3_manual_refresh_available = False
+        self.device._protocol = PROTOCOL.ScentMarketingGwProtocol()
         entities = []
         entry = SimpleNamespace(entry_id="test")
         hass = SimpleNamespace(data={BUTTON.DOMAIN: {entry.entry_id: self.device}})
@@ -213,7 +274,7 @@ class AKV3EntityContractsTest(unittest.IsolatedAsyncioTestCase):
             "mfr_id": 0x5942,
             "detected_family": "scent_marketing_gw",
         }
-        self.device.ak_v3_manual_refresh_available = False
+        self.device._protocol = PROTOCOL.ScentMarketingGwProtocol()
         entities = []
         entry = SimpleNamespace(entry_id="test")
         hass = SimpleNamespace(data={BUTTON.DOMAIN: {entry.entry_id: self.device}})
