@@ -48,8 +48,12 @@ to the observed A316 protocol and does not claim support for other AK models.
   schedule traffic.
 - Manual Refresh is supported. State is retained after an intentional temporary
   disconnect when it belongs to the current authenticated generation.
-- Schedule editing is implemented, but its controlled Phase 3 runtime test is
-  still in progress; do not treat schedule editing as fully validated yet.
+- Schedule reading and authenticated schedule editing are runtime-validated
+  only for the Ultra Max Tower A316. Validation changed Schedule 5 temporarily,
+  confirmed it through a physical direct-`4A` read-back, restored the exact
+  baseline, and completed a final physical verification. The reversible test
+  used `rollback_on_failure: false` and exactly two logical `2A` writes.
+  This does not validate schedule editing for other AK models.
 - Automatic periodic polling is not implemented.
 
 > **Warning:** Installing upstream Scent Assistant or another fork through HACS
