@@ -616,8 +616,22 @@ class ScentDiffuserDevice:
         if barrier is not None:
             barrier.failed = True
             barrier.released.set()
+            if self._ak_v3_startup_barrier is barrier:
+                self._ak_v3_startup_barrier = None
+            if self._ak_v3_startup_chain is barrier.chain:
+                self._ak_v3_startup_chain = None
+
+    def _release_ak_v3_startup_barrier(
+        self, barrier: AKV3StartupBarrier | None, *, failed: bool = False
+    ) -> bool:
+        """Release only the startup barrier still owned by this terminal path."""
+        if barrier is None or self._ak_v3_startup_barrier is not barrier:
+            return False
+        if failed:
+            barrier.failed = True
+        barrier.released.set()
         self._ak_v3_startup_barrier = None
-        self._ak_v3_startup_chain = None
+        return True
 
     async def _async_wait_for_ak_v3_startup_barrier(self) -> bool:
         """Keep independent V3 reads behind the current chain terminal state."""
@@ -1065,8 +1079,11 @@ class ScentDiffuserDevice:
                 self._ble_last_failure_ts = loop.time()
                 return False
 
-    def _on_ble_disconnected(self, _client: BleakClient) -> None:
+    def _on_ble_disconnected(self, client: BleakClient) -> None:
         """Mark device-derived state unavailable and serialize recovery."""
+        current_client = getattr(self, "_ble_client", None)
+        if current_client is not None and client is not current_client:
+            return
         if self._ble_disconnect_expected:
             return
         self._record_ak_v3_manual_refresh_trace(
@@ -1588,6 +1605,7 @@ class ScentDiffuserDevice:
             return
         chain_failed = False
         transaction: AKV3ModernRead | None = None
+        barrier: AKV3StartupBarrier | None = None
         try:
             barrier = getattr(self, "_ak_v3_startup_barrier", None)
             if barrier is not None:
@@ -1646,12 +1664,16 @@ class ScentDiffuserDevice:
                 missing_oil = {opcode for opcode in (0x4B, 0x50) if opcode not in chain.accepted_frames}
                 if missing_oil:
                     await self._async_refresh_ak_v3_oil_calculation_state(missing_oil)
+        except asyncio.CancelledError:
+            chain_failed = True
+            raise
         except (BleakError, asyncio.TimeoutError, OSError) as err:
             self._record_ak_v3_startup_trace("startup_failed")
             _LOGGER.warning("AK V3 startup reads failed on %s: %s", self._ble_name, err)
         finally:
             if transaction is not None:
                 await self._async_stop_ak_v3_modern_read(transaction)
+            self._release_ak_v3_startup_barrier(barrier, failed=chain_failed)
             self._ak_v3_startup_trace_active = False
             self._notify_state_changed()
 

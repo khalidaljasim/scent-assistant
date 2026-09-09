@@ -34,6 +34,30 @@
 
 ---
 
+## Fork-specific AK V3 support
+
+This `ak-v3-custom` fork is based on upstream Scent Assistant `v1.2.2`. It adds
+tested support for the Scent Marketing Ultra Max Tower A316 Bluetooth variant
+(manufacturer `0x5943`, service `FFF0`, characteristic `FFF6`). It is limited
+to the observed A316 protocol and does not claim support for other AK models.
+
+- Authenticated startup supports the observed `OK01` fallback, then performs
+  dynamic `21` time synchronization and capability-aware metadata reads.
+- Schedule reading collects five direct `4A` records and sends only the
+  permitted `CA` acknowledgements. AK V3 does not use V2 `83`, `89`, or `86`
+  schedule traffic.
+- Manual Refresh is supported. State is retained after an intentional temporary
+  disconnect when it belongs to the current authenticated generation.
+- Schedule editing is implemented, but its controlled Phase 3 runtime test is
+  still in progress; do not treat schedule editing as fully validated yet.
+- Automatic periodic polling is not implemented.
+
+> **Warning:** Installing upstream Scent Assistant or another fork through HACS
+> can overwrite these customizations. Keep this repository selected if you rely
+> on the A316 AK V3 behavior.
+
+---
+
 ## &#x1F4E6; Supported Devices
 
 ### Confirmed Working

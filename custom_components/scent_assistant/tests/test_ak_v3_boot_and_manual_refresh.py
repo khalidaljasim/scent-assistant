@@ -39,6 +39,7 @@ class AKV3BootAndManualRefreshTest(unittest.IsolatedAsyncioTestCase):
         device._ak_v3_modern_diagnostic_trace = None
         device._ak_v3_metadata_read = None
         device._ak_v3_startup_generation = 1
+        device._ak_v3_entity_platforms_ready = True
         device._ak_v3_login = DEVICE.AKV3LoginState(1)
         device._ak_v3_login.accepted = True
         device._ak_v3_read_transaction_id = 0
@@ -156,6 +157,115 @@ class AKV3BootAndManualRefreshTest(unittest.IsolatedAsyncioTestCase):
         chain.completed.set()
         await task
         self.assertTrue(barrier.released.is_set())
+        self.assertIsNone(device._ak_v3_startup_barrier)
+
+    async def test_passive_setup_releases_barrier_before_slot_update_baseline(self):
+        device = self._device()
+        events, sent, terminal_barriers = [], [], []
+        self._install_fresh_session(device, events, sent)
+        device._async_restore_ak_v3_schedules = lambda: asyncio.sleep(0)
+        device._notify_state_changed = lambda: terminal_barriers.append(device._ak_v3_startup_barrier)
+
+        await device.async_setup()
+
+        self.assertIsNone(device._ak_v3_startup_barrier)
+        self.assertIsNone(terminal_barriers[-1])
+
+        async def stop_before_write(frame):
+            sent.append(frame)
+            if frame[:1] == b"\x21":
+                for slot in range(1, 6):
+                    device._on_ble_notification(1, bytearray(_schedule(slot)))
+                return True
+            if frame[:1] == b"\x2A":
+                return False
+            return True
+
+        device._ble_send = stop_before_write
+        result = await device.async_update_ak_v3_slot(1, 5, start_minute=1)
+        self.assertEqual("AK V3 schedule write was not sent", result["error"])
+        self.assertIn(b"\x21", [frame[:1] for frame in sent])
+        self.assertEqual(1, len([frame for frame in sent if frame[:1] == b"\x2A"]))
+        self.assertIsNone(device._ak_v3_action_owner)
+
+    async def test_cancelled_startup_releases_only_its_barrier(self):
+        device = self._device()
+        chain = DEVICE.AKV3StartupChain(1, post_21_sent=True)
+        barrier = DEVICE.AKV3StartupBarrier(1, chain=chain)
+        barrier.armed.set()
+        device._ak_v3_startup_chain = chain
+        device._ak_v3_startup_barrier = barrier
+        device._arm_ak_v3_modern_collector()
+        task = asyncio.create_task(device._async_start_ak_v3_startup_reads())
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(barrier.released.is_set())
+        self.assertTrue(barrier.failed)
+        self.assertIsNone(device._ak_v3_startup_barrier)
+
+    async def test_timed_out_startup_releases_only_its_barrier(self):
+        device = self._device()
+        chain = DEVICE.AKV3StartupChain(1, post_21_sent=True)
+        barrier = DEVICE.AKV3StartupBarrier(1, chain=chain)
+        barrier.armed.set()
+        device._ak_v3_startup_chain = chain
+        device._ak_v3_startup_barrier = barrier
+        device._arm_ak_v3_modern_collector()
+        device._ble_send = lambda _frame: asyncio.sleep(0, result=True)
+        original_timeout = getattr(DEVICE, "AK_V3_TRANSACTION_READ_SECONDS")
+        setattr(DEVICE, "AK_V3_TRANSACTION_READ_SECONDS", 0)
+        try:
+            await device._async_start_ak_v3_startup_reads()
+        finally:
+            setattr(DEVICE, "AK_V3_TRANSACTION_READ_SECONDS", original_timeout)
+        self.assertTrue(barrier.released.is_set())
+        self.assertFalse(barrier.failed)
+        self.assertIsNone(device._ak_v3_startup_barrier)
+
+    def test_stale_barrier_cleanup_cannot_clear_replacement(self):
+        device = self._device()
+        stale = DEVICE.AKV3StartupBarrier(1)
+        replacement = DEVICE.AKV3StartupBarrier(2)
+        device._ak_v3_startup_barrier = replacement
+
+        self.assertFalse(device._release_ak_v3_startup_barrier(stale, failed=True))
+        self.assertIs(device._ak_v3_startup_barrier, replacement)
+        self.assertFalse(replacement.released.is_set())
+
+    def test_stale_disconnect_callback_cannot_clear_newer_barrier(self):
+        device = self._device()
+        stale_client = SimpleNamespace(is_connected=False)
+        device._ble_client = SimpleNamespace(is_connected=True)
+        barrier = DEVICE.AKV3StartupBarrier(1)
+        device._ak_v3_startup_barrier = barrier
+
+        device._on_ble_disconnected(stale_client)
+
+        self.assertIs(device._ak_v3_startup_barrier, barrier)
+        self.assertFalse(barrier.released.is_set())
+
+    async def test_current_disconnect_releases_its_owned_barrier(self):
+        device = self._device()
+        client = SimpleNamespace(is_connected=True)
+        device._ble_client = client
+        device._ble_disconnect_expected = False
+        device._ble_reconnect_task = None
+        device._ak_v3_current_fields = set()
+        device._ak_v3_retained_generation = None
+        device._ak_v3_retained_fields = set()
+        device._clear_device_derived_state = lambda: None
+        device._async_reconnect_after_disconnect = lambda: asyncio.sleep(0)
+        barrier = DEVICE.AKV3StartupBarrier(1)
+        device._ak_v3_startup_barrier = barrier
+
+        device._on_ble_disconnected(client)
+        await asyncio.sleep(0)
+
+        self.assertTrue(barrier.released.is_set())
+        self.assertTrue(barrier.failed)
+        self.assertIsNone(device._ak_v3_startup_barrier)
 
     async def test_startup_does_not_begin_while_slot_action_owns_the_session(self):
         device = self._device()
