@@ -6,6 +6,7 @@ import importlib
 import sys
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 
@@ -54,10 +55,11 @@ def _load_device_module():
         "homeassistant.helpers.event": event,
         "homeassistant.helpers.storage": storage,
     })
+    component_root = Path(__file__).resolve().parents[2]
     root = types.ModuleType("custom_components")
-    root.__path__ = ["/homeassistant/custom_components"]
+    root.__path__ = [str(component_root)]
     package = types.ModuleType("custom_components.scent_assistant")
-    package.__path__ = ["/homeassistant/custom_components/scent_assistant"]
+    package.__path__ = [str(component_root / "scent_assistant")]
     cloud = types.ModuleType("custom_components.scent_assistant.protocol_cloud")
     cloud.AromaLinkCloudClient = object
     sys.modules["custom_components"] = root

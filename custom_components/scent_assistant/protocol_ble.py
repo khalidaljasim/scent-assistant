@@ -1659,16 +1659,8 @@ class ScentMarketingAkProtocol(BleProtocol):
                 work_seconds = (data[14] << 8) | data[15]
                 pause_seconds = (data[16] << 8) | data[17]
             result["ak_v3_schedule"] = self._parse_v3_schedule(data)
-            self._absorb_schedule(
-                slot_index=data[5],
-                start_hour=data[7], start_minute=data[8],
-                end_hour=data[9], end_minute=data[10],
-                weekday_mask=data[11],
-                intensity=data[13],
-                result=result,
-                work_seconds=work_seconds,
-                pause_seconds=pause_seconds,
-            )
+            # A V3 4A frame is one physical schedule slot, not a live global
+            # intensity/grade update. Slot values are owned by ak_v3_schedule.
             # Byte 3 is aroma-level state, independent of the slot's occupancy.
             result["total_fan"] = bool(data[3] & 0x02)
             result["diffusion_enabled"] = bool(data[3] & 0x01)

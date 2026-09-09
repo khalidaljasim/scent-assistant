@@ -2174,28 +2174,49 @@ class ScentDiffuserDevice:
         if transaction.endpoint is None or set(transaction.records) != set(range(1, 6)):
             return
         endpoint = transaction.endpoint
+        changed = False
+        schedules_changed = False
         for slot, schedule in transaction.records.items():
             identity = (endpoint, slot)
             if schedule.is_empty:
-                self._state.ak_v3_schedules.pop(identity, None)
-                self._state.ak_v3_empty_schedules[identity] = schedule
+                if (
+                    identity in self._state.ak_v3_schedules
+                    or self._state.ak_v3_empty_schedules.get(identity) != schedule
+                ):
+                    self._state.ak_v3_schedules.pop(identity, None)
+                    self._state.ak_v3_empty_schedules[identity] = schedule
+                    schedules_changed = True
             else:
-                self._state.ak_v3_schedules[identity] = schedule
-                self._state.ak_v3_empty_schedules.pop(identity, None)
-                self._ak_v3_restored_identities.discard(identity)
+                if (
+                    self._state.ak_v3_schedules.get(identity) != schedule
+                    or identity in self._state.ak_v3_empty_schedules
+                ):
+                    self._state.ak_v3_schedules[identity] = schedule
+                    self._state.ak_v3_empty_schedules.pop(identity, None)
+                    schedules_changed = True
+                if identity in self._ak_v3_restored_identities:
+                    self._ak_v3_restored_identities.discard(identity)
+                    changed = True
             self._ak_v3_confirmation_metadata[identity] = {
                 "confirmed_at": datetime.now().astimezone().isoformat(), "source": "fresh_physical",
             }
-            self._set_ak_v3_slot_lifecycle(
-                identity, self._ak_v3_slot_lifecycle_from_schedule(schedule, identity), notify=False
-            )
-        self._persist_ak_v3_schedules()
+            lifecycle = self._ak_v3_slot_lifecycle_from_schedule(schedule, identity)
+            if self._ak_v3_slot_lifecycle.get(identity) != lifecycle:
+                self._set_ak_v3_slot_lifecycle(identity, lifecycle, notify=False)
+                changed = True
+        if schedules_changed:
+            self._persist_ak_v3_schedules()
+            changed = True
         # Individual 4A records are provisional. Publish the schedule family
         # only after this transaction commits every physical slot.
         if transaction.aggregate_flags is not None:
-            self._state.fan, self._state.diffusion_enabled = transaction.aggregate_flags
+            fan, diffusion_enabled = transaction.aggregate_flags
+            if (self._state.fan, self._state.diffusion_enabled) != (fan, diffusion_enabled):
+                self._state.fan, self._state.diffusion_enabled = fan, diffusion_enabled
+                changed = True
         self._retain_ak_v3_fields("schedules", "fan_aggregate")
-        self._notify_state_changed()
+        if changed:
+            self._notify_state_changed()
 
     def _handle_ak_v3_modern_read_notification(self, raw: bytes, schedule: object | None) -> bool:
         """Advance only an active transaction with its exact expected response."""
@@ -2560,6 +2581,8 @@ class ScentDiffuserDevice:
                 # Collector evidence cannot partially update legacy aggregates.
                 updates.pop("total_fan", None)
                 updates.pop("diffusion_enabled", None)
+                updates.pop("schedule_custom_mode", None)
+                updates.pop("schedule_enabled", None)
         if not updates:
             return
 
@@ -2681,23 +2704,34 @@ class ScentDiffuserDevice:
             schedule = updates["ak_v3_schedule"]
             identity = (schedule.endpoint_id, schedule.slot_id)
             if not modern_ak_v3_read:
+                schedule_changed = False
                 if schedule.is_empty:
-                    self._state.ak_v3_schedules.pop(identity, None)
-                    self._state.ak_v3_empty_schedules[identity] = schedule
+                    if (
+                        identity in self._state.ak_v3_schedules
+                        or self._state.ak_v3_empty_schedules.get(identity) != schedule
+                    ):
+                        self._state.ak_v3_schedules.pop(identity, None)
+                        self._state.ak_v3_empty_schedules[identity] = schedule
+                        schedule_changed = True
                 else:
-                    self._state.ak_v3_schedules[identity] = schedule
-                    self._state.ak_v3_empty_schedules.pop(identity, None)
+                    if (
+                        self._state.ak_v3_schedules.get(identity) != schedule
+                        or identity in self._state.ak_v3_empty_schedules
+                    ):
+                        self._state.ak_v3_schedules[identity] = schedule
+                        self._state.ak_v3_empty_schedules.pop(identity, None)
+                        schedule_changed = True
                     self._ak_v3_restored_identities.discard(identity)
-                    self._ak_v3_confirmation_metadata[identity] = {
-                        "confirmed_at": datetime.now().astimezone().isoformat(), "source": "fresh_physical",
-                    }
+                self._ak_v3_confirmation_metadata[identity] = {
+                    "confirmed_at": datetime.now().astimezone().isoformat(), "source": "fresh_physical",
+                }
+                lifecycle = self._ak_v3_slot_lifecycle_from_schedule(schedule, identity)
+                if self._ak_v3_slot_lifecycle.get(identity) != lifecycle:
+                    self._set_ak_v3_slot_lifecycle(identity, lifecycle, notify=False)
+                    schedule_changed = True
+                if schedule_changed:
                     self._persist_ak_v3_schedules()
-                self._set_ak_v3_slot_lifecycle(
-                    identity,
-                    self._ak_v3_slot_lifecycle_from_schedule(schedule, identity),
-                    notify=False,
-                )
-            changed = True
+                    changed = True
 
         # Derive oil days-remaining from the latest oil + schedule state.
         # The 0x50 frame's raw value doesn't match the official app, which

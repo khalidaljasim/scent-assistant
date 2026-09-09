@@ -8,10 +8,13 @@ import unittest
 from test_ak_v3_slot_transaction import DEVICE, PROTOCOL
 
 
-def _frame(slot: int, *, endpoint: int = 1, state: int = 0x03, total: int = 0x03) -> bytes:
+def _frame(
+    slot: int, *, endpoint: int = 1, state: int = 0x03, total: int = 0x03,
+    intensity: int | None = None,
+) -> bytes:
     return bytes([
         0x4A, endpoint, 0x02, total, slot, slot, state,
-        8, 0, 20, 0, 0x7F, 0x01, slot + 3, 0, 10, 0, 120,
+        8, 0, 20, 0, 0x7F, 0x01, slot + 3 if intensity is None else intensity, 0, 10, 0, 120,
     ])
 
 
@@ -134,6 +137,30 @@ class AKV3ModernReadTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.device.state.fan)
         self.assertTrue(self.device.state.diffusion_enabled)
         self.assertEqual({(1, slot) for slot in range(1, 6)}, set(self.device.state.ak_v3_schedules))
+
+    async def test_4a_slots_do_not_overwrite_global_intensity(self):
+        self.device._state.intensity = 12
+        intensities = (10, 6, 8, 4, 6)
+        await self.device._async_start_ak_v3_modern_read()
+        for slot, intensity in enumerate(intensities, start=1):
+            self.device._on_ble_notification(1, bytearray(_frame(slot, intensity=intensity)))
+        await self._drain()
+
+        self.assertEqual(12, self.device.state.intensity)
+        self.assertEqual(
+            intensities,
+            tuple(self.device.state.ak_v3_schedules[(1, slot)].intensity for slot in range(1, 6)),
+        )
+
+    async def test_identical_4a_table_does_not_notify_state_callbacks(self):
+        await self._commit_table()
+        callbacks = []
+        self.device._notify_state_changed = lambda: callbacks.append(True)
+
+        await self._commit_table()
+        await self._drain()
+
+        self.assertEqual([], callbacks)
 
     async def _commit_table(self):
         await self.device._async_start_ak_v3_modern_read()
