@@ -1,0 +1,57 @@
+name: Open OpenCode pull request
+
+on:
+  push:
+    branches:
+      - "opencode/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: opencode-pull-request-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  open-pull-request:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out pushed commit
+        uses: actions/checkout@v5
+
+      - name: Create pull request if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
+          TARGET_BRANCH: ak-v3-custom
+        run: |
+          if gh pr list \
+            --head "$SOURCE_BRANCH" \
+            --base "$TARGET_BRANCH" \
+            --state open \
+            --json number \
+            --jq 'length' | grep -qx '[1-9][0-9]*'; then
+            echo "An open pull request already exists for $SOURCE_BRANCH."
+            exit 0
+          fi
+
+          subject="$(git log -1 --format=%s)"
+          body="$(git log -1 --format=%b)"
+          sha="$(git rev-parse HEAD)"
+          description="$(mktemp)"
+          {
+            printf 'Source branch: `%s`\n' "$SOURCE_BRANCH"
+            printf 'Target branch: `%s`\n' "$TARGET_BRANCH"
+            printf 'Latest commit: `%s`\n' "$sha"
+            if [ -n "$body" ]; then
+              printf '\n## Commit details\n%s\n' "$body"
+            fi
+          } > "$description"
+
+          gh pr create \
+            --base "$TARGET_BRANCH" \
+            --head "$SOURCE_BRANCH" \
+            --title "$subject" \
+            --body-file "$description"
