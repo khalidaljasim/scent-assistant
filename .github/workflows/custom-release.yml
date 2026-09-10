@@ -1,0 +1,73 @@
+name: Publish custom release
+
+on:
+  push:
+    branches:
+      - ak-v3-custom
+    paths:
+      - custom_components/scent_assistant/manifest.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scent-assistant-custom-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/ak-v3-custom'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Read and validate manifest version
+        id: manifest
+        run: |
+          version="$(python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path("custom_components/scent_assistant/manifest.json").read_text()
+          )
+          version = manifest.get("version")
+          if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", version):
+              raise SystemExit("manifest version must contain three or four numeric components")
+          print(version)
+          PY
+          )"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.manifest.outputs.tag }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+          TARGET: ${{ github.sha }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+            exit 0
+          fi
+
+          if git ls-remote --exit-code --refs origin "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists; creating its missing release only."
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$TAG" \
+              -f "sha=$TARGET"
+          fi
+
+          gh release create "$TAG" \
+            --title "Scent Assistant Custom $VERSION" \
+            --generate-notes \
+            --latest

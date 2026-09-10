@@ -94,20 +94,3 @@ jobs:
           fi
 
           git push origin HEAD:ak-v3-custom
-
-      - name: Publish custom release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          version="$(python -c \
-            'import json; print(json.load(open("custom_components/scent_assistant/manifest.json"))["version"])')"
-          tag="v$version"
-
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            git tag -a "$tag" -m "Scent Assistant custom $version"
-            git push origin "$tag"
-            gh release create "$tag" \
-              --target ak-v3-custom \
-              --title "Scent Assistant Custom $version" \
-              --notes "Validated custom build preserving AK V3 device requirements."
-          fi
